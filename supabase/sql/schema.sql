@@ -1,0 +1,100 @@
+-- Payment Ledger v2 schema
+-- Run this in a NEW Supabase project (SQL Editor), separate from the old
+-- payment-ledger project, so the old app stays completely untouched.
+--
+-- Core idea vs v1: nothing is ever deleted. A "withdrawal" tags the deposits
+-- it covers (withdrawal_id) instead of destroying them, so full history is
+-- always recoverable and balances are always derived from the transaction
+-- log, never hand-edited.
+
+create extension if not exists "pgcrypto"; -- for gen_random_uuid()
+
+create table accounts (
+  id uuid primary key default gen_random_uuid(),
+  name text not null,
+  provider text not null check (provider in ('stripe', 'paypal', 'invoice', 'other')),
+  payment_link text,                 -- the buy.stripe.com / paypal.me link people pay into
+  stripe_payment_link_id text,       -- Stripe's plink_xxx id -- used to match incoming webhooks to this account
+  paypal_payee_email text,           -- used to match incoming PayPal webhooks to this account
+  default_currency text not null default 'USD',
+  archived boolean not null default false,   -- soft delete: never hard-delete an account with history
+  sort_order integer not null default 0,
+  created_at timestamptz not null default now()
+);
+
+create table withdrawals (
+  id uuid primary key default gen_random_uuid(),
+  account_id uuid not null references accounts(id),
+  currency text not null,               -- the currency the covered deposits were actually in
+  gross numeric(14,2) not null,
+  commission_pct numeric(5,2) not null default 0,
+  commission_amt numeric(14,2) not null,
+  net numeric(14,2) not null,           -- net in the ORIGINAL currency (post-commission, pre-conversion)
+  payout_currency text not null,        -- what you actually chose to receive -- equals `currency` unless converted
+  payout_net numeric(14,2) not null,    -- net converted into payout_currency (equals `net` when not converted)
+  fx_rate_used numeric(14,6) not null default 1,  -- rate applied at withdrawal time, kept for audit even if FX Rates later change
+  transaction_count integer not null default 0,
+  created_at timestamptz not null default now()
+);
+
+-- Only deposits live here. A withdrawal is represented by a row in the
+-- withdrawals table plus tagging the deposits it covers (withdrawal_id) --
+-- there is no separate "withdrawal" transaction row, so there is exactly
+-- one place balances can be computed from.
+create table transactions (
+  id uuid primary key default gen_random_uuid(),
+  account_id uuid not null references accounts(id),
+  type text not null default 'deposit' check (type in ('deposit', 'adjustment')),
+  source text not null check (source in ('manual', 'stripe_webhook', 'paypal_webhook')),
+  amount numeric(14,2) not null check (amount > 0),
+  currency text not null,
+  note text,
+  external_ref text,                 -- provider's event/payment id -- traceability, not uniqueness (webhook_events handles dedupe)
+  withdrawal_id uuid references withdrawals(id),  -- set once this deposit is folded into a withdrawal; null = still available
+  occurred_at date not null default current_date,
+  created_at timestamptz not null default now()
+);
+
+create index transactions_account_idx on transactions(account_id);
+create index transactions_withdrawal_idx on transactions(withdrawal_id);
+
+-- Idempotency + audit log for inbound webhooks. The unique constraint is what
+-- stops a Stripe/PayPal retry from double-counting the same payment.
+create table webhook_events (
+  id uuid primary key default gen_random_uuid(),
+  provider text not null check (provider in ('stripe', 'paypal')),
+  external_event_id text not null,
+  payload jsonb not null,
+  processed boolean not null default false,
+  error text,
+  received_at timestamptz not null default now(),
+  unique (provider, external_event_id)
+);
+
+-- Balances are always computed from the ledger, never stored/mutated directly.
+-- (app.js recomputes the same thing client-side; this view exists so you can
+-- also query balances directly in the SQL editor / other reporting tools.)
+create or replace view account_balances as
+select
+  a.id as account_id,
+  a.name,
+  a.provider,
+  a.archived,
+  t.currency,
+  coalesce(sum(case when t.withdrawal_id is null then t.amount else 0 end), 0) as available_balance,
+  coalesce(sum(t.amount), 0) as lifetime_deposits,
+  coalesce((
+    select sum(w.gross) from withdrawals w where w.account_id = a.id and w.currency = t.currency
+  ), 0) as lifetime_withdrawn,
+  count(*) filter (where t.withdrawal_id is null) as pending_transaction_count
+from accounts a
+left join transactions t on t.account_id = a.id
+group by a.id, a.name, a.provider, a.archived, t.currency;
+
+-- Matches the existing v1 project's security posture (no RLS) since that's
+-- the explicit choice already made for this tool. Revisit if this app starts
+-- handling other people's data beyond your own small-team use case.
+alter table accounts disable row level security;
+alter table withdrawals disable row level security;
+alter table transactions disable row level security;
+alter table webhook_events disable row level security;
