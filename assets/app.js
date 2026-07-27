@@ -538,18 +538,25 @@ function renderFeedRow(item) {
   if (item.kind === 'deposit') {
     const t = item.data;
     const acc = accountById(t.accountId);
-    const locked = !!t.withdrawalId;
+    const withdrawn = !!t.withdrawalId;
+    // Auto-captured amounts came straight from Stripe/PayPal and are already
+    // confirmed -- editing them would let the ledger silently drift from what
+    // was actually received, so they're never editable, withdrawn or not.
+    // Delete stays available (not amount-editable) in case a payment was ever
+    // mismatched to the wrong account.
+    const autoCaptured = t.source !== 'manual';
     const confirming = deleteConfirmId === t.id;
     const sourceTag = t.source === 'manual' ? '<span class="tag source-manual">&#9998; Manual</span>' : '<span class="tag source-auto">&#9889; Auto</span>';
+    const amountTitle = withdrawn ? '' : (autoCaptured ? 'title="Confirmed by Stripe/PayPal -- not editable"' : '');
     return `<div class="feed-row">
       <div class="feed-left">
         <span class="who">${escapeHtml(acc ? acc.name : 'Unknown')} ${sourceTag}</span>
         <span class="meta">${fmtDate(t.occurredAt)}${t.note ? ' &middot; ' + escapeHtml(t.note) : ''}</span>
       </div>
       <div class="feed-right">
-        <span class="feed-amount deposit ${locked ? 'locked' : ''}">${fmt(t.amount, t.currency)}</span>
-        ${!locked ? `
-          <button class="icon-btn edit-btn" data-id="${t.id}" title="Edit">&#9998;</button>
+        <span class="feed-amount deposit ${withdrawn ? 'locked' : ''}" ${amountTitle}>${fmt(t.amount, t.currency)}</span>
+        ${!withdrawn ? `
+          ${!autoCaptured ? `<button class="icon-btn edit-btn" data-id="${t.id}" title="Edit">&#9998;</button>` : ''}
           <button class="icon-btn delete-btn ${confirming ? 'confirming' : ''}" data-id="${t.id}" title="Delete">${confirming ? 'Confirm' : '&#10005;'}</button>
         ` : ''}
       </div>
@@ -668,6 +675,7 @@ $('paymentSave').addEventListener('click', async () => {
 function openEditModal(id) {
   const t = transactions.find((x) => x.id === id);
   if (!t) return;
+  if (t.source !== 'manual') { showToast('Auto-captured amounts are confirmed by Stripe/PayPal and can\'t be edited'); return; }
   editingPaymentId = id;
   const acc = accountById(t.accountId);
   $('editSub').textContent = acc ? `${acc.name} · ${providerLabel(acc.provider)}` : '';
