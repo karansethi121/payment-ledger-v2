@@ -1,35 +1,36 @@
 // Receives PayPal webhook events and auto-logs completed payments as deposits.
 //
-// Setup (after creating the Supabase project and running schema.sql):
-//   1. In the PayPal Developer Dashboard, create a webhook pointing at:
-//        https://<project-ref>.supabase.co/functions/v1/paypal-webhook
-//      subscribed to: PAYMENT.CAPTURE.COMPLETED
-//   2. supabase secrets set PAYPAL_CLIENT_ID=...
-//      supabase secrets set PAYPAL_CLIENT_SECRET=...
-//      supabase secrets set PAYPAL_WEBHOOK_ID=...        (shown after creating the webhook)
-//      supabase secrets set PAYPAL_API_BASE=https://api-m.paypal.com   (or the sandbox host while testing)
-//   3. supabase functions deploy paypal-webhook --no-verify-jwt
+// United Goods UK and Dilpreet Sethi are separate PayPal accounts, each with
+// their own app credentials and webhook subscription. Rather than matching by
+// payee email (fragile if PayPal ever changes what it puts in the payload),
+// this tries each configured account's credentials against PayPal's
+// verify-webhook-signature API; whichever one succeeds tells us definitively
+// which ledger account the payment belongs to.
 //
-// Matching a payment to one of your accounts: PayPal includes the receiving
-// account's email on the capture resource. Store that email in
-// accounts.paypal_payee_email so this function knows which account it belongs to.
+// Setup (after creating the Supabase project and running schema.sql):
+//   supabase secrets set PAYPAL_ACCOUNTS_JSON='[{"accountId":"ugu-paypal","clientId":"...","clientSecret":"...","webhookId":"..."},{"accountId":"dilpreet-paypal","clientId":"...","clientSecret":"...","webhookId":"..."}]'
+//   supabase secrets set PAYPAL_API_BASE=https://api-m.paypal.com   (or the sandbox host while testing)
+//   supabase functions deploy paypal-webhook --no-verify-jwt
+// In EACH PayPal account's Developer Dashboard, add a webhook pointing at:
+//   https://<project-ref>.supabase.co/functions/v1/paypal-webhook
+// subscribed to: PAYMENT.CAPTURE.COMPLETED
 
 import { createClient } from "npm:@supabase/supabase-js@2";
 
-const PAYPAL_CLIENT_ID = Deno.env.get("PAYPAL_CLIENT_ID") ?? "";
-const PAYPAL_CLIENT_SECRET = Deno.env.get("PAYPAL_CLIENT_SECRET") ?? "";
-const PAYPAL_WEBHOOK_ID = Deno.env.get("PAYPAL_WEBHOOK_ID") ?? "";
+type PayPalAccountConfig = { accountId: string; clientId: string; clientSecret: string; webhookId: string };
+
+const PAYPAL_ACCOUNTS: PayPalAccountConfig[] = JSON.parse(Deno.env.get("PAYPAL_ACCOUNTS_JSON") ?? "[]");
 const PAYPAL_API_BASE = Deno.env.get("PAYPAL_API_BASE") ?? "https://api-m.paypal.com";
 const SUPABASE_URL = Deno.env.get("SUPABASE_URL") ?? "";
 const SUPABASE_SERVICE_ROLE_KEY = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY") ?? "";
 
 const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY);
 
-async function getAccessToken(): Promise<string> {
+async function getAccessToken(clientId: string, clientSecret: string): Promise<string> {
   const res = await fetch(`${PAYPAL_API_BASE}/v1/oauth2/token`, {
     method: "POST",
     headers: {
-      Authorization: `Basic ${btoa(`${PAYPAL_CLIENT_ID}:${PAYPAL_CLIENT_SECRET}`)}`,
+      Authorization: `Basic ${btoa(`${clientId}:${clientSecret}`)}`,
       "Content-Type": "application/x-www-form-urlencoded",
     },
     body: "grant_type=client_credentials",
@@ -39,8 +40,8 @@ async function getAccessToken(): Promise<string> {
   return data.access_token;
 }
 
-async function verifySignature(req: Request, rawBody: string, webhookEvent: unknown): Promise<boolean> {
-  const accessToken = await getAccessToken();
+async function verifyAgainstAccount(req: Request, webhookEvent: unknown, account: PayPalAccountConfig): Promise<boolean> {
+  const accessToken = await getAccessToken(account.clientId, account.clientSecret);
   const res = await fetch(`${PAYPAL_API_BASE}/v1/notifications/verify-webhook-signature`, {
     method: "POST",
     headers: {
@@ -53,7 +54,7 @@ async function verifySignature(req: Request, rawBody: string, webhookEvent: unkn
       transmission_id: req.headers.get("PAYPAL-TRANSMISSION-ID"),
       transmission_sig: req.headers.get("PAYPAL-TRANSMISSION-SIG"),
       transmission_time: req.headers.get("PAYPAL-TRANSMISSION-TIME"),
-      webhook_id: PAYPAL_WEBHOOK_ID,
+      webhook_id: account.webhookId,
       webhook_event: webhookEvent,
     }),
   });
@@ -69,12 +70,24 @@ Deno.serve(async (req) => {
   const rawBody = await req.text();
   const webhookEvent = JSON.parse(rawBody);
 
-  const verified = await verifySignature(req, rawBody, webhookEvent);
-  if (!verified) {
-    console.error("PayPal signature verification failed for event", webhookEvent.id);
+  let matchedAccountId: string | null = null;
+  for (const account of PAYPAL_ACCOUNTS) {
+    try {
+      if (await verifyAgainstAccount(req, webhookEvent, account)) {
+        matchedAccountId = account.accountId;
+        break;
+      }
+    } catch (err) {
+      console.warn(`Verification attempt failed for ${account.accountId}:`, (err as Error).message);
+    }
+  }
+
+  if (!matchedAccountId) {
+    console.error("PayPal signature verification failed against all configured accounts for event", webhookEvent.id);
     return new Response("Signature verification failed", { status: 400 });
   }
 
+  // Idempotency: PayPal retries on any non-2xx response, so duplicates are expected.
   const { error: dedupeError } = await supabase.from("webhook_events").insert({
     provider: "paypal",
     external_event_id: webhookEvent.id,
@@ -95,33 +108,16 @@ Deno.serve(async (req) => {
   const resource = webhookEvent.resource;
   const amount = parseFloat(resource?.amount?.value ?? "0");
   const currency = resource?.amount?.currency_code ?? "USD";
-  const payeeEmail = resource?.payee?.email_address;
-
-  if (!payeeEmail) {
-    await markEventError(webhookEvent.id, "No payee email on capture; can't match to an account");
-    return new Response(JSON.stringify({ received: true, unmatched: true }), { status: 200 });
-  }
-
-  const { data: account, error: accountError } = await supabase
-    .from("accounts")
-    .select("id")
-    .eq("paypal_payee_email", payeeEmail)
-    .maybeSingle();
-
-  if (accountError || !account) {
-    await markEventError(webhookEvent.id, `No account matches paypal_payee_email=${payeeEmail}`);
-    return new Response(JSON.stringify({ received: true, unmatched: true }), { status: 200 });
-  }
 
   const { error: insertError } = await supabase.from("transactions").insert({
     id: `paypal-${crypto.randomUUID()}`,
-    account_id: account.id,
+    account_id: matchedAccountId,
     type: "deposit",
     source: "paypal_webhook",
     amount,
     currency,
     note: "Auto-captured via PayPal",
-    external_ref: resource.id,
+    external_ref: resource?.id ?? null,
   });
 
   if (insertError) {

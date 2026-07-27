@@ -21,7 +21,14 @@ same purpose (accounts, payment links, a ledger, cashing out) but a different co
 - **Stripe auto-capture**: deployed and verified working for both Stripe accounts
   (Karan Sethi, United Goods UK) -- tested end-to-end with synthetic signed events,
   confirmed correct account routing, correct amount, and idempotency on retry.
-- **PayPal auto-capture**: function deployed, not yet wired to real credentials.
+- **PayPal auto-capture**: deployed and configured for both PayPal accounts (United
+  Goods UK, Dilpreet Sethi -- also separate accounts, same reasoning as Stripe: routes
+  by whichever account's credentials verify the signature, via `PAYPAL_ACCOUNTS_JSON`).
+  Both accounts' Client ID/Secret were validated live against PayPal's OAuth endpoint
+  (confirmed real, working credentials). What's *not* verified yet: an actual signed
+  webhook delivery -- PayPal's signature scheme is certificate-based (RSA), which can't
+  be forged locally to test the way Stripe's HMAC could be, so send a real small payment
+  through each PayPal link once to confirm it lands in the ledger automatically.
 
 Since Karan Sethi and United Goods UK are **separate Stripe accounts** (not two Payment
 Links under one account), the Stripe function doesn't match by Payment Link ID -- each
