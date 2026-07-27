@@ -1,4 +1,4 @@
-const CACHE_NAME = 'ledger-v2-shell-1';
+const CACHE_NAME = 'ledger-v2-shell-2';
 const SHELL_FILES = [
   './',
   './index.html',

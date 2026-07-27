@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
 <meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, viewport-fit=cover">
 <title>Payment Ledger</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
@@ -56,6 +56,10 @@
   </div>
 
 </div>
+
+<!-- Mobile-only floating action button -- the top "+Payment" button is a real reach
+     on a tall phone screen; this puts the most common action in the thumb zone. -->
+<button class="mobile-fab" id="mobileFab" title="Log a payment" aria-label="Log a payment">+</button>
 
 <div class="toast" id="toast"></div>
 

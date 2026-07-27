@@ -242,7 +242,7 @@ header.top {
 .toast.show { opacity: 1; transform: translateX(-50%) translateY(0); }
 
 .sync-banner {
-  position: fixed; bottom: 24px; left: 50%; transform: translateX(-50%); width: calc(100% - 40px); max-width: 460px;
+  position: fixed; bottom: calc(24px + env(safe-area-inset-bottom)); left: 50%; transform: translateX(-50%); width: calc(100% - 40px); max-width: 460px;
   background: var(--invoice-bg); border: 1px solid var(--invoice-border); color: var(--invoice-text);
   border-radius: var(--radius-sm); padding: 10px 14px; font-size: 12.5px; font-weight: 600;
   display: none; align-items: center; justify-content: space-between; gap: 10px; z-index: 45; box-shadow: 0 10px 28px rgba(0,0,0,.4);
@@ -250,7 +250,57 @@ header.top {
 .sync-banner.show { display: flex; }
 .sync-banner button { background: rgba(251,191,36,0.22); border: none; color: var(--invoice-text); font-weight: 700; font-size: 11px; padding: 6px 10px; border-radius: 20px; cursor: pointer; white-space: nowrap; }
 
-@media (max-width: 560px) {
-  .shell { padding: 22px 16px 84px; }
+.mobile-fab {
+  display: none; /* shown only on narrow/touch viewports, see media query below */
+  position: fixed; right: 20px; bottom: calc(20px + env(safe-area-inset-bottom));
+  width: 58px; height: 58px; border-radius: 50%; border: none;
+  background: linear-gradient(135deg, var(--accent) 0%, var(--accent-dark) 100%); color: #04211d;
+  font-size: 28px; font-weight: 700; line-height: 1; cursor: pointer; z-index: 60;
+  box-shadow: 0 8px 24px var(--accent-glow), 0 4px 12px rgba(0,0,0,0.4);
+  align-items: center; justify-content: center;
+}
+.mobile-fab:active { transform: scale(0.94); }
+
+/* ---------- Mobile layout ---------- */
+@media (max-width: 640px) {
+  .shell { padding: 20px 14px 108px; } /* extra bottom room so the FAB never covers the last feed row/Data section */
   .account-grid { grid-template-columns: 1fr; }
+
+  /* Touch targets: 27px icon buttons are well under the ~44px Apple/Google
+     recommend for reliable thumb taps -- this is the #1 real mobile usability
+     bug in the previous layout, not just a visual nit. */
+  .icon-btn, .edit-btn, .delete-btn { width: 38px; height: 38px; font-size: 14px; }
+  .delete-btn.confirming, .icon-btn.confirming { width: auto; padding: 0 12px; }
+  .copy-link-btn { padding: 9px 12px; font-size: 11.5px; }
+
+  /* Prevent iOS Safari's zoom-on-focus, which otherwise fires on any input
+     under 16px -- was happening on every single form field in this app. */
+  .text-input, .date-input, .select-input, .search-input, .commission-input,
+  .amount-row .text-input, .fx-rate-row input {
+    font-size: 16px !important;
+  }
+
+  /* Top "+Payment" gives way to the FAB in the thumb zone; keep "+Account"
+     since it's used far less often and doesn't need to be one-thumb-reachable. */
+  #addPaymentBtn { display: none; }
+  .mobile-fab { display: flex; }
+
+  /* Bottom sheet instead of a centered card -- easier to reach and dismiss
+     one-handed, and keeps the dismiss tap target (backdrop) huge. */
+  .modal-overlay { align-items: flex-end; padding: 0; }
+  .modal-sheet {
+    max-width: 100%; max-height: 92vh; border-radius: var(--radius-lg) var(--radius-lg) 0 0;
+    padding: 22px 18px calc(22px + env(safe-area-inset-bottom));
+    transform: translateY(100%);
+  }
+  .modal-overlay.show .modal-sheet { transform: translateY(0); }
+
+  .activity-controls { flex-direction: column; }
+  .activity-controls .search-input { width: 100%; }
+  .activity-controls .date-input { flex: 1; min-width: 0; }
+
+  .data-row { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+  .data-row button { width: 100%; }
+
+  .toast { bottom: calc(24px + env(safe-area-inset-bottom)); max-width: calc(100% - 32px); white-space: normal; text-align: center; }
 }

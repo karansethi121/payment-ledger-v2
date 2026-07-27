@@ -454,7 +454,10 @@ function renderAccountGrid() {
         }).join('<div style="height:1px;background:var(--border-color);margin:2px 0;"></div>')
       : `<p class="sub" style="color:var(--text-dim);font-size:12.5px;margin:0;">No payments yet.</p>`;
 
-    const noLinkInvoiceTag = (!acc.paymentLink && acc.provider === 'invoice') ? '<span class="tag invoice">📄 Invoice</span>' : '';
+    // Only flag "no link" for stripe/paypal/other accounts -- when provider is
+    // already 'invoice' the provider tag itself says that, so a second badge
+    // saying the same thing is just noise.
+    const noLinkInvoiceTag = (!acc.paymentLink && acc.provider !== 'invoice') ? '<span class="tag invoice">📄 Invoice</span>' : '';
     const staleTag = staleWarningTag(acc);
 
     return `<div class="account-card ${acc.archived ? 'archived' : ''}">
@@ -642,6 +645,7 @@ function openPaymentModal() {
 function closePaymentModal() { $('paymentModal').classList.remove('show'); }
 
 $('addPaymentBtn').addEventListener('click', openPaymentModal);
+$('mobileFab').addEventListener('click', openPaymentModal);
 $('paymentCancel').addEventListener('click', closePaymentModal);
 $('paymentModal').addEventListener('click', (e) => { if (e.target.id === 'paymentModal') closePaymentModal(); });
 $('paymentSave').addEventListener('click', async () => {
