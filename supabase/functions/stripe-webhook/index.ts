@@ -1,26 +1,31 @@
 // Receives Stripe webhook events and auto-logs completed payments as deposits.
 //
+// Karan Sethi and United Goods UK are separate Stripe accounts, so this
+// doesn't try to match a payment to an account via Payment Link ID -- instead
+// each Stripe account gets its own webhook endpoint pointing here, and since
+// each account's signing secret is unique, whichever secret verifies the
+// signature tells us definitively which ledger account the payment belongs to.
+//
 // Setup (after creating the Supabase project and running schema.sql):
-//   supabase secrets set STRIPE_WEBHOOK_SECRET=whsec_...   (from your Stripe webhook endpoint config)
+//   supabase secrets set STRIPE_ACCOUNTS_JSON='[{"accountId":"karan-stripe","secret":"whsec_..."},{"accountId":"ugu-stripe","secret":"whsec_..."}]'
 //   supabase functions deploy stripe-webhook --no-verify-jwt
-// Then in the Stripe Dashboard -> Developers -> Webhooks, add an endpoint pointing at:
+// Then in EACH Stripe account's Dashboard -> Developers -> Webhooks, add an
+// endpoint pointing at:
 //   https://<project-ref>.supabase.co/functions/v1/stripe-webhook
 // listening for: checkout.session.completed
-//
-// Matching a payment to one of your accounts: each Stripe Payment Link has an id
-// (plink_xxx). Store that id in accounts.stripe_payment_link_id so this function
-// knows which account a given payment belongs to.
+// (Each account's endpoint gets its own signing secret -- that's the secret
+// that goes in STRIPE_ACCOUNTS_JSON for that account's accountId.)
 
-import Stripe from "npm:stripe@14?target=deno";
+import Stripe from "npm:stripe@14";
 import { createClient } from "npm:@supabase/supabase-js@2";
 
-const STRIPE_WEBHOOK_SECRET = Deno.env.get("STRIPE_WEBHOOK_SECRET") ?? "";
+type StripeAccountConfig = { accountId: string; secret: string };
+
+const STRIPE_ACCOUNTS: StripeAccountConfig[] = JSON.parse(Deno.env.get("STRIPE_ACCOUNTS_JSON") ?? "[]");
 const SUPABASE_URL = Deno.env.get("SUPABASE_URL") ?? "";
 const SUPABASE_SERVICE_ROLE_KEY = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY") ?? "";
 
-const stripe = new Stripe(STRIPE_WEBHOOK_SECRET ? "sk_dummy_not_used_for_verification" : "sk_dummy", {
-  apiVersion: "2023-10-16",
-});
+const stripe = new Stripe("sk_dummy_not_used_for_verification", { apiVersion: "2023-10-16" });
 const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY);
 
 Deno.serve(async (req) => {
@@ -35,12 +40,23 @@ Deno.serve(async (req) => {
     return new Response("Missing Stripe-Signature header", { status: 400 });
   }
 
-  let event: Stripe.Event;
-  try {
-    event = await stripe.webhooks.constructEventAsync(rawBody, signature, STRIPE_WEBHOOK_SECRET);
-  } catch (err) {
-    console.error("Signature verification failed:", err.message);
-    return new Response(`Webhook signature verification failed: ${err.message}`, { status: 400 });
+  let event: Stripe.Event | null = null;
+  let matchedAccountId: string | null = null;
+  let lastError: Error | null = null;
+
+  for (const { accountId, secret } of STRIPE_ACCOUNTS) {
+    try {
+      event = await stripe.webhooks.constructEventAsync(rawBody, signature, secret);
+      matchedAccountId = accountId;
+      break;
+    } catch (err) {
+      lastError = err as Error;
+    }
+  }
+
+  if (!event || !matchedAccountId) {
+    console.error("Signature verification failed against all configured accounts:", lastError?.message);
+    return new Response(`Webhook signature verification failed: ${lastError?.message}`, { status: 400 });
   }
 
   // Idempotency: if we've already recorded this event, acknowledge and stop.
@@ -63,28 +79,12 @@ Deno.serve(async (req) => {
   }
 
   const session = event.data.object as Stripe.Checkout.Session;
-  const paymentLinkId = typeof session.payment_link === "string" ? session.payment_link : session.payment_link?.id;
   const amount = (session.amount_total ?? 0) / 100;
   const currency = (session.currency ?? "usd").toUpperCase();
 
-  if (!paymentLinkId) {
-    await markEventError(event.id, "No payment_link on session; can't match to an account");
-    return new Response(JSON.stringify({ received: true, unmatched: true }), { status: 200 });
-  }
-
-  const { data: account, error: accountError } = await supabase
-    .from("accounts")
-    .select("id")
-    .eq("stripe_payment_link_id", paymentLinkId)
-    .maybeSingle();
-
-  if (accountError || !account) {
-    await markEventError(event.id, `No account matches stripe_payment_link_id=${paymentLinkId}`);
-    return new Response(JSON.stringify({ received: true, unmatched: true }), { status: 200 });
-  }
-
   const { error: insertError } = await supabase.from("transactions").insert({
-    account_id: account.id,
+    id: `stripe-${crypto.randomUUID()}`,
+    account_id: matchedAccountId,
     type: "deposit",
     source: "stripe_webhook",
     amount,

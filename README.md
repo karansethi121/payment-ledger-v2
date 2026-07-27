@@ -13,9 +13,32 @@ same purpose (accounts, payment links, a ledger, cashing out) but a different co
 - **One dashboard** — balances, a 14-day trend per account, and a unified activity feed,
   instead of three separate tabs.
 
-Right now this runs entirely in **Demo mode**: open `index.html` and it seeds itself with
-sample data in `localStorage`, no backend required. Everything below is what it takes to
-wire it to a real Supabase project and real Stripe/PayPal webhooks.
+## Current status (this deployment)
+
+- **Supabase project**: `payment-ledger-v2` (karansethi121 personal account, ref
+  `zanmfrhhmruwebhakdwn`), schema applied, connected in `assets/app.js` -- mode pill
+  shows "⚡ Supabase Live".
+- **Stripe auto-capture**: deployed and verified working for both Stripe accounts
+  (Karan Sethi, United Goods UK) -- tested end-to-end with synthetic signed events,
+  confirmed correct account routing, correct amount, and idempotency on retry.
+- **PayPal auto-capture**: function deployed, not yet wired to real credentials.
+
+Since Karan Sethi and United Goods UK are **separate Stripe accounts** (not two Payment
+Links under one account), the Stripe function doesn't match by Payment Link ID -- each
+Stripe account gets its own webhook endpoint pointing here, and whichever signing secret
+verifies the incoming request tells us which ledger account it belongs to. That mapping
+lives in the `STRIPE_ACCOUNTS_JSON` secret:
+
+```bash
+supabase secrets set STRIPE_ACCOUNTS_JSON='[{"accountId":"karan-stripe","secret":"whsec_..."},{"accountId":"ugu-stripe","secret":"whsec_..."}]'
+```
+
+`accountId` must match the `accounts.id` value in the database exactly (`karan-stripe`,
+`ugu-stripe`). To add another Stripe account later: create its webhook endpoint in that
+Stripe account's own dashboard pointing at the same function URL, get its signing secret,
+and add another `{accountId, secret}` entry to the JSON array.
+
+## Setting this up from scratch (a new deployment)
 
 ## 1. Create a new Supabase project
 
@@ -42,13 +65,14 @@ seed data; nothing from Demo mode carries over automatically).
 
 ## 3. Add accounts, with the auto-capture matching fields
 
-For each account you add:
-
-- **Stripe accounts**: paste the Stripe Payment Link's ID (`plink_...`, found in the
-  Stripe Dashboard under Payment Links) into "Stripe Payment Link ID". This is how the
-  webhook knows which account a payment belongs to.
+- **Stripe**: if each ledger account is a *separate Stripe account*, you don't need
+  any per-account field here — see `STRIPE_ACCOUNTS_JSON` above, matching is done by
+  webhook secret. If instead multiple ledger accounts share *one* Stripe account with
+  different Payment Links, paste that link's id (`plink_...`, from the Stripe Dashboard)
+  into "Stripe Payment Link ID" and use a single shared `STRIPE_WEBHOOK_SECRET` instead
+  (this path exists in the account form but isn't the one currently wired up).
 - **PayPal accounts**: paste the receiving PayPal account's email into "PayPal payee
-  email" — same purpose.
+  email" — this is how that function matches a payment to an account.
 
 You can leave these blank and only use manual entry if you don't want auto-capture yet.
 
@@ -59,7 +83,7 @@ per `supabase --version` in this environment) and linking to your new project:
 
 ```bash
 supabase link --project-ref your-project-ref
-supabase secrets set STRIPE_WEBHOOK_SECRET=whsec_...
+supabase secrets set STRIPE_ACCOUNTS_JSON='[{"accountId":"...","secret":"whsec_..."}]'
 supabase secrets set PAYPAL_CLIENT_ID=...
 supabase secrets set PAYPAL_CLIENT_SECRET=...
 supabase secrets set PAYPAL_WEBHOOK_ID=...
@@ -69,22 +93,20 @@ supabase functions deploy paypal-webhook --no-verify-jwt
 ```
 
 Then:
-- **Stripe** Dashboard → Developers → Webhooks → add endpoint
-  `https://your-project-ref.supabase.co/functions/v1/stripe-webhook`, listening for
-  `checkout.session.completed`. Copy its signing secret into `STRIPE_WEBHOOK_SECRET` above.
+- **Stripe** — in *each* Stripe account you're wiring up, Dashboard → Developers →
+  Webhooks → add endpoint `https://your-project-ref.supabase.co/functions/v1/stripe-webhook`,
+  listening for `checkout.session.completed`. Each account gets its own signing secret --
+  add it to `STRIPE_ACCOUNTS_JSON` alongside that account's `accountId`.
 - **PayPal** Developer Dashboard → your app → Webhooks → add endpoint
   `https://your-project-ref.supabase.co/functions/v1/paypal-webhook`, subscribed to
   `PAYMENT.CAPTURE.COMPLETED`. Copy the webhook ID into `PAYPAL_WEBHOOK_ID` above.
 
 **What's been tested vs. not:** the frontend (dashboard, wallet math, non-destructive
-withdrawal, account/payment CRUD, the cloud-sync retry queue) has been exercised end to
-end locally. The Stripe function's signature-verification algorithm was independently
-validated against Stripe's documented HMAC scheme. Neither webhook function has been
-tested against a live Stripe/PayPal delivery (this environment has no Docker, so the
-local Supabase function emulator isn't available, and there are no live API credentials
-to test against). Validate both with a real test payment before relying on auto-capture —
-Stripe's CLI (`stripe listen --forward-to <url>` + `stripe trigger checkout.session.completed`)
-and PayPal's sandbox webhook simulator are the standard ways to do that.
+withdrawal, account/payment CRUD, the cloud-sync retry queue) and the Stripe function
+(signature verification, account routing, idempotency) have been exercised end-to-end
+against the live deployed project. The PayPal function's signature-verification call
+to PayPal's API hasn't been tested against a live delivery yet (no PayPal credentials
+configured so far) -- validate it with PayPal's sandbox webhook simulator once wired up.
 
 ## 5. Deploy the frontend
 

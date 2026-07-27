@@ -114,6 +114,7 @@ Deno.serve(async (req) => {
   }
 
   const { error: insertError } = await supabase.from("transactions").insert({
+    id: `paypal-${crypto.randomUUID()}`,
     account_id: account.id,
     type: "deposit",
     source: "paypal_webhook",
