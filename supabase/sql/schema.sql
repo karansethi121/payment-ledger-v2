@@ -7,10 +7,13 @@
 -- always recoverable and balances are always derived from the transaction
 -- log, never hand-edited.
 
-create extension if not exists "pgcrypto"; -- for gen_random_uuid()
+create extension if not exists "pgcrypto"; -- for gen_random_uuid() (still used by webhook_events)
 
+-- accounts/withdrawals/transactions use client-generated text ids (not uuid)
+-- because the app writes optimistically to localStorage before the network
+-- round-trip completes, and needs an id up front to do that.
 create table accounts (
-  id uuid primary key default gen_random_uuid(),
+  id text primary key,
   name text not null,
   provider text not null check (provider in ('stripe', 'paypal', 'invoice', 'other')),
   payment_link text,                 -- the buy.stripe.com / paypal.me link people pay into
@@ -23,8 +26,8 @@ create table accounts (
 );
 
 create table withdrawals (
-  id uuid primary key default gen_random_uuid(),
-  account_id uuid not null references accounts(id),
+  id text primary key,
+  account_id text not null references accounts(id),
   currency text not null,               -- the currency the covered deposits were actually in
   gross numeric(14,2) not null,
   commission_pct numeric(5,2) not null default 0,
@@ -42,15 +45,15 @@ create table withdrawals (
 -- there is no separate "withdrawal" transaction row, so there is exactly
 -- one place balances can be computed from.
 create table transactions (
-  id uuid primary key default gen_random_uuid(),
-  account_id uuid not null references accounts(id),
+  id text primary key,
+  account_id text not null references accounts(id),
   type text not null default 'deposit' check (type in ('deposit', 'adjustment')),
   source text not null check (source in ('manual', 'stripe_webhook', 'paypal_webhook')),
   amount numeric(14,2) not null check (amount > 0),
   currency text not null,
   note text,
   external_ref text,                 -- provider's event/payment id -- traceability, not uniqueness (webhook_events handles dedupe)
-  withdrawal_id uuid references withdrawals(id),  -- set once this deposit is folded into a withdrawal; null = still available
+  withdrawal_id text references withdrawals(id),  -- set once this deposit is folded into a withdrawal; null = still available
   occurred_at date not null default current_date,
   created_at timestamptz not null default now()
 );

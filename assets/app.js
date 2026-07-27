@@ -1,9 +1,9 @@
 /* ================= Config ================= */
-// Fill these in once you've created a NEW Supabase project and run supabase/sql/schema.sql.
-// Until then, the app runs fully in local "Demo mode" (localStorage only, seeded with sample data)
-// so you can try the whole flow before wiring anything up.
-const SUPABASE_URL = 'YOUR_SUPABASE_PROJECT_URL';
-const SUPABASE_KEY = 'YOUR_SUPABASE_ANON_KEY';
+// payment-ledger-v2 Supabase project (karansethi121's personal account), schema
+// already applied. Auto-capture (Stripe/PayPal Edge Functions) is not deployed
+// yet -- see README.md for that step.
+const SUPABASE_URL = 'https://zanmfrhhmruwebhakdwn.supabase.co';
+const SUPABASE_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Inphbm1mcmhobXJ1d2ViaGFrZHduIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODUxNzI3MDQsImV4cCI6MjEwMDc0ODcwNH0.mBVRRj2kY6RjoJ5iiREBOwy0eowj9AmwlkGlCEpXQ_w';
 const USE_SUPABASE = /^https:\/\//.test(SUPABASE_URL) && !SUPABASE_URL.includes('YOUR_SUPABASE');
 
 /* ================= State ================= */
