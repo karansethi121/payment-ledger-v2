@@ -40,20 +40,30 @@ create table withdrawals (
   created_at timestamptz not null default now()
 );
 
--- Only deposits live here. A withdrawal is represented by a row in the
--- withdrawals table plus tagging the deposits it covers (withdrawal_id) --
--- there is no separate "withdrawal" transaction row, so there is exactly
--- one place balances can be computed from.
+-- Deposits AND refunds/chargebacks live here, both as positive magnitudes --
+-- `type` determines whether a row adds to or subtracts from the running
+-- balance, never a negative `amount` (keeps every stored figure a plain
+-- readable positive number; sign is a display/math concern, not a storage
+-- one). A withdrawal is represented by a row in the withdrawals table plus
+-- tagging the rows it covers (withdrawal_id) -- there is no separate
+-- "withdrawal" transaction row, so there is exactly one place balances can
+-- be computed from.
+--
+-- A refund/chargeback always subtracts from whatever's *currently* available,
+-- not specifically from the deposit it corrects -- if that deposit was
+-- already withdrawn, available balance can go negative, which is the correct
+-- signal that the amount is now owed back on the next withdrawal.
 create table transactions (
   id text primary key,
   account_id text not null references accounts(id),
-  type text not null default 'deposit' check (type in ('deposit', 'adjustment')),
+  type text not null default 'deposit' check (type in ('deposit', 'adjustment', 'refund')),
   source text not null check (source in ('manual', 'stripe_webhook', 'paypal_webhook')),
   amount numeric(14,2) not null check (amount > 0),
   currency text not null,
   note text,
   external_ref text,                 -- provider's event/payment id -- traceability, not uniqueness (webhook_events handles dedupe)
-  withdrawal_id text references withdrawals(id),  -- set once this deposit is folded into a withdrawal; null = still available
+  related_transaction_id text references transactions(id),  -- for refunds: the original deposit being corrected, if it could be matched
+  withdrawal_id text references withdrawals(id),  -- set once this row is folded into a withdrawal; null = still pending
   occurred_at date not null default current_date,
   created_at timestamptz not null default now()
 );
@@ -84,12 +94,17 @@ select
   a.provider,
   a.archived,
   t.currency,
-  coalesce(sum(case when t.withdrawal_id is null then t.amount else 0 end), 0) as available_balance,
-  coalesce(sum(t.amount), 0) as lifetime_deposits,
+  coalesce(sum(case
+    when t.withdrawal_id is not null then 0
+    when t.type = 'refund' then -t.amount
+    else t.amount
+  end), 0) as available_balance,
+  coalesce(sum(case when t.type = 'deposit' then t.amount else 0 end), 0) as lifetime_deposits,
+  coalesce(sum(case when t.type = 'refund' then t.amount else 0 end), 0) as lifetime_refunded,
   coalesce((
     select sum(w.gross) from withdrawals w where w.account_id = a.id and w.currency = t.currency
   ), 0) as lifetime_withdrawn,
-  count(*) filter (where t.withdrawal_id is null) as pending_transaction_count
+  count(*) filter (where t.withdrawal_id is null and t.type = 'deposit') as pending_transaction_count
 from accounts a
 left join transactions t on t.account_id = a.id
 group by a.id, a.name, a.provider, a.archived, t.currency;

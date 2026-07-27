@@ -1,11 +1,13 @@
-// Receives PayPal webhook events and auto-logs completed payments as deposits.
+// Receives PayPal webhook events: logs completed payments as deposits, and
+// refunds as linked negative corrections (never edits or deletes the
+// original deposit -- see the "refund" transaction type in schema.sql).
 //
 // United Goods UK and Dilpreet Sethi are separate PayPal accounts, each with
 // their own app credentials and webhook subscription. Rather than matching by
 // payee email (fragile if PayPal ever changes what it puts in the payload),
 // this tries each configured account's credentials against PayPal's
 // verify-webhook-signature API; whichever one succeeds tells us definitively
-// which ledger account the payment belongs to.
+// which ledger account the event belongs to.
 //
 // Setup (after creating the Supabase project and running schema.sql):
 //   supabase secrets set PAYPAL_ACCOUNTS_JSON='[{"accountId":"ugu-paypal","clientId":"...","clientSecret":"...","webhookId":"..."},{"accountId":"dilpreet-paypal","clientId":"...","clientSecret":"...","webhookId":"..."}]'
@@ -13,7 +15,7 @@
 //   supabase functions deploy paypal-webhook --no-verify-jwt
 // In EACH PayPal account's Developer Dashboard, add a webhook pointing at:
 //   https://<project-ref>.supabase.co/functions/v1/paypal-webhook
-// subscribed to: PAYMENT.CAPTURE.COMPLETED
+// subscribed to: PAYMENT.CAPTURE.COMPLETED, PAYMENT.CAPTURE.REFUNDED
 
 import { createClient } from "npm:@supabase/supabase-js@2";
 
@@ -101,17 +103,32 @@ Deno.serve(async (req) => {
     return new Response("Failed to log event", { status: 500 });
   }
 
-  if (webhookEvent.event_type !== "PAYMENT.CAPTURE.COMPLETED") {
-    return new Response(JSON.stringify({ received: true, ignored: webhookEvent.event_type }), { status: 200 });
+  try {
+    if (webhookEvent.event_type === "PAYMENT.CAPTURE.COMPLETED") {
+      await handleDeposit(webhookEvent, matchedAccountId);
+    } else if (webhookEvent.event_type === "PAYMENT.CAPTURE.REFUNDED") {
+      await handleRefund(webhookEvent, matchedAccountId);
+    } else {
+      return new Response(JSON.stringify({ received: true, ignored: webhookEvent.event_type }), { status: 200 });
+    }
+  } catch (err) {
+    await markEventError(webhookEvent.id, `Handler failed: ${(err as Error).message}`);
+    return new Response("Failed to process event", { status: 500 });
   }
 
+  await supabase.from("webhook_events").update({ processed: true }).eq("provider", "paypal").eq("external_event_id", webhookEvent.id);
+  return new Response(JSON.stringify({ received: true }), { status: 200 });
+});
+
+// deno-lint-ignore no-explicit-any
+async function handleDeposit(webhookEvent: any, accountId: string) {
   const resource = webhookEvent.resource;
   const amount = parseFloat(resource?.amount?.value ?? "0");
   const currency = resource?.amount?.currency_code ?? "USD";
 
-  const { error: insertError } = await supabase.from("transactions").insert({
+  const { error } = await supabase.from("transactions").insert({
     id: `paypal-${crypto.randomUUID()}`,
-    account_id: matchedAccountId,
+    account_id: accountId,
     type: "deposit",
     source: "paypal_webhook",
     amount,
@@ -119,16 +136,47 @@ Deno.serve(async (req) => {
     note: "Auto-captured via PayPal",
     external_ref: resource?.id ?? null,
   });
+  if (error) throw new Error(`Failed to insert deposit: ${error.message}`);
+}
 
-  if (insertError) {
-    await markEventError(webhookEvent.id, `Failed to insert transaction: ${insertError.message}`);
-    return new Response("Failed to record transaction", { status: 500 });
-  }
+// A PayPal refund resource doesn't carry the original capture id in a plain
+// field -- it's embedded in the "up" relation link, e.g.
+// ".../v2/payments/captures/{capture_id}". Each refund is its own event with
+// its own resource.id (unlike Stripe's cumulative charge.refunded), so no
+// incremental-delta tracking is needed here.
+// deno-lint-ignore no-explicit-any
+function extractCaptureId(resource: any): string | null {
+  const links: Array<{ rel?: string; href?: string }> = resource?.links ?? [];
+  const upLink = links.find((l) => l.rel === "up");
+  if (!upLink?.href) return null;
+  const parts = upLink.href.split("/");
+  return parts[parts.length - 1] || null;
+}
 
-  await supabase.from("webhook_events").update({ processed: true }).eq("provider", "paypal").eq("external_event_id", webhookEvent.id);
+// deno-lint-ignore no-explicit-any
+async function handleRefund(webhookEvent: any, accountId: string) {
+  const resource = webhookEvent.resource;
+  const amount = parseFloat(resource?.amount?.value ?? "0");
+  const currency = resource?.amount?.currency_code ?? "USD";
+  const captureId = extractCaptureId(resource);
 
-  return new Response(JSON.stringify({ received: true }), { status: 200 });
-});
+  const original = captureId
+    ? (await supabase.from("transactions").select("id").eq("account_id", accountId).eq("external_ref", captureId).eq("type", "deposit").maybeSingle()).data
+    : null;
+
+  const { error } = await supabase.from("transactions").insert({
+    id: `paypal-refund-${crypto.randomUUID()}`,
+    account_id: accountId,
+    type: "refund",
+    source: "paypal_webhook",
+    amount,
+    currency,
+    note: "Refund via PayPal",
+    external_ref: resource?.id ?? null,
+    related_transaction_id: original?.id ?? null,
+  });
+  if (error) throw new Error(`Failed to insert refund: ${error.message}`);
+}
 
 async function markEventError(eventId: string, message: string) {
   await supabase.from("webhook_events").update({ error: message }).eq("provider", "paypal").eq("external_event_id", eventId);

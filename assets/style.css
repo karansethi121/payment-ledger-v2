@@ -146,8 +146,10 @@ header.top {
 .feed-right { display: flex; align-items: center; gap: 10px; flex-shrink: 0; }
 .feed-amount { font-family: 'JetBrains Mono', monospace; font-size: 15px; font-weight: 700; }
 .feed-amount.deposit { color: var(--accent-light); }
+.feed-amount.refund { color: var(--danger); }
 .feed-amount.withdrawal { color: var(--text-secondary); }
 .feed-amount.locked::after { content: ' 🔒'; font-size: 10px; }
+.balance-row .amt.negative { color: var(--danger); }
 
 .icon-btn {
   border: none; background: var(--bg-input); color: var(--text-dim); border-radius: 7px;

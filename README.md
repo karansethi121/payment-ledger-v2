@@ -6,10 +6,18 @@ same purpose (accounts, payment links, a ledger, cashing out) but a different co
 - **Auto-capture** — Stripe and PayPal webhooks log completed payments the moment they
   land. Manual entry becomes the fallback (invoice-only accounts, anything a webhook missed),
   not the main flow.
+- **Refunds/chargebacks are corrections, not edits** — a refund posts as its own linked
+  negative entry (`type = 'refund'`) against the account's running balance, same "never
+  destroy history" principle as withdrawals. If the original deposit was already
+  withdrawn, the balance can go negative -- that's correct, not a bug: it means the
+  amount is now owed back on the next withdrawal.
 - **Real wallets, not batch withdrawals** — every account has a running balance derived
-  from its full transaction history. Withdrawing tags the covered deposits as settled
-  instead of deleting them, so nothing is ever destroyed and the full history stays visible
-  (locked, not editable, but always there).
+  from its full transaction history. Withdrawing tags the covered deposits (and any
+  pending refunds) as settled instead of deleting them, so nothing is ever destroyed and
+  the full history stays visible (locked, not editable, but always there).
+- **Auto-captured amounts are never editable or deletable** — whether a deposit or a
+  refund, once it came from Stripe/PayPal directly it's treated as ground truth. Only
+  manually-entered rows can be edited or deleted.
 - **One dashboard** — balances, a 14-day trend per account, and a unified activity feed,
   instead of three separate tabs.
 
@@ -19,16 +27,17 @@ same purpose (accounts, payment links, a ledger, cashing out) but a different co
   `zanmfrhhmruwebhakdwn`), schema applied, connected in `assets/app.js` -- mode pill
   shows "⚡ Supabase Live".
 - **Stripe auto-capture**: deployed and verified working for both Stripe accounts
-  (Karan Sethi, United Goods UK) -- tested end-to-end with synthetic signed events,
-  confirmed correct account routing, correct amount, and idempotency on retry.
-- **PayPal auto-capture**: deployed and configured for both PayPal accounts (United
-  Goods UK, Dilpreet Sethi -- also separate accounts, same reasoning as Stripe: routes
-  by whichever account's credentials verify the signature, via `PAYPAL_ACCOUNTS_JSON`).
-  Both accounts' Client ID/Secret were validated live against PayPal's OAuth endpoint
-  (confirmed real, working credentials). What's *not* verified yet: an actual signed
-  webhook delivery -- PayPal's signature scheme is certificate-based (RSA), which can't
-  be forged locally to test the way Stripe's HMAC could be, so send a real small payment
-  through each PayPal link once to confirm it lands in the ledger automatically.
+  (Karan Sethi, United Goods UK) -- confirmed end-to-end with real live payments landing
+  correctly, tagged "⚡ Auto".
+- **PayPal auto-capture**: deployed and verified working for both PayPal accounts
+  (United Goods UK, Dilpreet Sethi) -- also confirmed with real live payments after
+  fixing two webhooks that had never actually been subscribed on PayPal's side (the
+  IDs given initially didn't correspond to real, saved webhooks).
+- **Refunds/chargebacks**: code deployed (`charge.refunded` + `charge.dispute.funds_withdrawn`
+  for Stripe, `PAYMENT.CAPTURE.REFUNDED` for PayPal) but **not yet subscribed to in either
+  dashboard** -- the original webhook setup only requested the completed-payment event.
+  Add the extra event type(s) to each existing webhook endpoint (don't need new endpoints,
+  just add the event to the existing subscription) to activate this.
 
 Since Karan Sethi and United Goods UK are **separate Stripe accounts** (not two Payment
 Links under one account), the Stripe function doesn't match by Payment Link ID -- each

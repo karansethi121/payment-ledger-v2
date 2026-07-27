@@ -1,10 +1,12 @@
-// Receives Stripe webhook events and auto-logs completed payments as deposits.
+// Receives Stripe webhook events: logs completed payments as deposits, and
+// refunds/chargebacks as linked negative corrections (never edits or deletes
+// the original deposit -- see the "refund" transaction type in schema.sql).
 //
 // Karan Sethi and United Goods UK are separate Stripe accounts, so this
 // doesn't try to match a payment to an account via Payment Link ID -- instead
 // each Stripe account gets its own webhook endpoint pointing here, and since
 // each account's signing secret is unique, whichever secret verifies the
-// signature tells us definitively which ledger account the payment belongs to.
+// signature tells us definitively which ledger account the event belongs to.
 //
 // Setup (after creating the Supabase project and running schema.sql):
 //   supabase secrets set STRIPE_ACCOUNTS_JSON='[{"accountId":"karan-stripe","secret":"whsec_..."},{"accountId":"ugu-stripe","secret":"whsec_..."}]'
@@ -12,7 +14,7 @@
 // Then in EACH Stripe account's Dashboard -> Developers -> Webhooks, add an
 // endpoint pointing at:
 //   https://<project-ref>.supabase.co/functions/v1/stripe-webhook
-// listening for: checkout.session.completed
+// listening for: checkout.session.completed, charge.refunded, charge.dispute.funds_withdrawn
 // (Each account's endpoint gets its own signing secret -- that's the secret
 // that goes in STRIPE_ACCOUNTS_JSON for that account's accountId.)
 
@@ -74,34 +76,105 @@ Deno.serve(async (req) => {
     return new Response("Failed to log event", { status: 500 });
   }
 
-  if (event.type !== "checkout.session.completed") {
-    return new Response(JSON.stringify({ received: true, ignored: event.type }), { status: 200 });
+  try {
+    if (event.type === "checkout.session.completed") {
+      await handleDeposit(event, matchedAccountId);
+    } else if (event.type === "charge.refunded") {
+      await handleRefund(event, matchedAccountId);
+    } else if (event.type === "charge.dispute.funds_withdrawn") {
+      await handleChargeback(event, matchedAccountId);
+    } else {
+      return new Response(JSON.stringify({ received: true, ignored: event.type }), { status: 200 });
+    }
+  } catch (err) {
+    await markEventError(event.id, `Handler failed: ${(err as Error).message}`);
+    return new Response("Failed to process event", { status: 500 });
   }
 
+  await supabase.from("webhook_events").update({ processed: true }).eq("provider", "stripe").eq("external_event_id", event.id);
+  return new Response(JSON.stringify({ received: true }), { status: 200 });
+});
+
+async function handleDeposit(event: Stripe.Event, accountId: string) {
   const session = event.data.object as Stripe.Checkout.Session;
   const amount = (session.amount_total ?? 0) / 100;
   const currency = (session.currency ?? "usd").toUpperCase();
+  // payment_intent is the id refund/dispute events will reference later --
+  // more stable to join on than the checkout session id itself.
+  const paymentIntentId = typeof session.payment_intent === "string" ? session.payment_intent : session.payment_intent?.id;
 
-  const { error: insertError } = await supabase.from("transactions").insert({
+  const { error } = await supabase.from("transactions").insert({
     id: `stripe-${crypto.randomUUID()}`,
-    account_id: matchedAccountId,
+    account_id: accountId,
     type: "deposit",
     source: "stripe_webhook",
     amount,
     currency,
     note: "Auto-captured via Stripe",
-    external_ref: session.id,
+    external_ref: paymentIntentId ?? session.id,
   });
+  if (error) throw new Error(`Failed to insert deposit: ${error.message}`);
+}
 
-  if (insertError) {
-    await markEventError(event.id, `Failed to insert transaction: ${insertError.message}`);
-    return new Response("Failed to record transaction", { status: 500 });
+async function handleRefund(event: Stripe.Event, accountId: string) {
+  const charge = event.data.object as Stripe.Charge;
+  const paymentIntentId = typeof charge.payment_intent === "string" ? charge.payment_intent : charge.payment_intent?.id;
+  const currency = (charge.currency ?? "usd").toUpperCase();
+  const totalRefunded = (charge.amount_refunded ?? 0) / 100;
+
+  const original = paymentIntentId
+    ? (await supabase.from("transactions").select("id").eq("account_id", accountId).eq("external_ref", paymentIntentId).eq("type", "deposit").maybeSingle()).data
+    : null;
+
+  // charge.refunded fires with the CUMULATIVE amount refunded so far on this
+  // charge, not the incremental delta -- for a second partial refund on the
+  // same charge, we only want to record the new portion, not double-count
+  // what a previous charge.refunded delivery already recorded.
+  let alreadyRecorded = 0;
+  if (original) {
+    const { data: priorRefunds } = await supabase.from("transactions").select("amount").eq("related_transaction_id", original.id).eq("type", "refund");
+    alreadyRecorded = (priorRefunds ?? []).reduce((sum, r) => sum + Number(r.amount), 0);
   }
+  const delta = totalRefunded - alreadyRecorded;
+  if (delta <= 0) return; // nothing new to record (duplicate delivery or zero-amount edge case)
 
-  await supabase.from("webhook_events").update({ processed: true }).eq("provider", "stripe").eq("external_event_id", event.id);
+  const { error } = await supabase.from("transactions").insert({
+    id: `stripe-refund-${crypto.randomUUID()}`,
+    account_id: accountId,
+    type: "refund",
+    source: "stripe_webhook",
+    amount: delta,
+    currency,
+    note: "Refund via Stripe",
+    external_ref: paymentIntentId ?? charge.id,
+    related_transaction_id: original?.id ?? null,
+  });
+  if (error) throw new Error(`Failed to insert refund: ${error.message}`);
+}
 
-  return new Response(JSON.stringify({ received: true }), { status: 200 });
-});
+async function handleChargeback(event: Stripe.Event, accountId: string) {
+  const dispute = event.data.object as Stripe.Dispute;
+  const paymentIntentId = typeof dispute.payment_intent === "string" ? dispute.payment_intent : dispute.payment_intent?.id;
+  const currency = (dispute.currency ?? "usd").toUpperCase();
+  const amount = (dispute.amount ?? 0) / 100;
+
+  const original = paymentIntentId
+    ? (await supabase.from("transactions").select("id").eq("account_id", accountId).eq("external_ref", paymentIntentId).eq("type", "deposit").maybeSingle()).data
+    : null;
+
+  const { error } = await supabase.from("transactions").insert({
+    id: `stripe-chargeback-${crypto.randomUUID()}`,
+    account_id: accountId,
+    type: "refund",
+    source: "stripe_webhook",
+    amount,
+    currency,
+    note: "Chargeback via Stripe",
+    external_ref: paymentIntentId ?? dispute.id,
+    related_transaction_id: original?.id ?? null,
+  });
+  if (error) throw new Error(`Failed to insert chargeback: ${error.message}`);
+}
 
 async function markEventError(eventId: string, message: string) {
   await supabase.from("webhook_events").update({ error: message }).eq("provider", "stripe").eq("external_event_id", eventId);

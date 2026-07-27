@@ -107,6 +107,7 @@ function rowFromTransaction(t) {
   return {
     id: t.id, account_id: t.accountId, type: t.type || 'deposit', source: t.source,
     amount: t.amount, currency: t.currency, note: t.note, external_ref: t.externalRef || null,
+    related_transaction_id: t.relatedTransactionId || null,
     withdrawal_id: t.withdrawalId || null, occurred_at: t.occurredAt, created_at: t.createdAt
   };
 }
@@ -230,7 +231,8 @@ const storageAdapter = {
         if (error) throw error;
         return data.map((t) => ({
           id: t.id, accountId: t.account_id, type: t.type, source: t.source, amount: Number(t.amount),
-          currency: t.currency, note: t.note || '', externalRef: t.external_ref, withdrawalId: t.withdrawal_id,
+          currency: t.currency, note: t.note || '', externalRef: t.external_ref,
+          relatedTransactionId: t.related_transaction_id, withdrawalId: t.withdrawal_id,
           occurredAt: t.occurred_at, createdAt: t.created_at
         }));
       } catch (e) {
@@ -302,12 +304,20 @@ const storageAdapter = {
 };
 
 /* ================= Balance math (always derived, never stored) ================= */
+// Refunds/chargebacks subtract from whatever's *currently* available, not
+// specifically from the deposit they correct -- if that deposit was already
+// withdrawn, this can legitimately go negative (you owe it back next time).
 function computeBalances(accountId) {
   const map = {};
   transactions.filter((t) => t.accountId === accountId).forEach((t) => {
-    if (!map[t.currency]) map[t.currency] = { available: 0, lifetime: 0, count: 0 };
-    map[t.currency].lifetime += t.amount;
-    if (!t.withdrawalId) { map[t.currency].available += t.amount; map[t.currency].count += 1; }
+    if (!map[t.currency]) map[t.currency] = { available: 0, lifetime: 0, refunded: 0, count: 0 };
+    if (t.type === 'refund') {
+      map[t.currency].refunded += t.amount;
+      if (!t.withdrawalId) map[t.currency].available -= t.amount;
+    } else {
+      map[t.currency].lifetime += t.amount;
+      if (!t.withdrawalId) { map[t.currency].available += t.amount; map[t.currency].count += 1; }
+    }
   });
   return map;
 }
@@ -330,9 +340,12 @@ function staleWarningTag(acc) {
   return '';
 }
 function sparklineData(accountId, currency, days = 14) {
+  // Deposits only -- a single-hue bar chart can't cleanly represent refunds
+  // going the other direction without becoming a diverging chart. Refund
+  // impact shows in the balance figure and the "refunded" line instead.
   const buckets = new Array(days).fill(0);
   const today = new Date(todayISO() + 'T00:00:00');
-  transactions.filter((t) => t.accountId === accountId && t.currency === currency).forEach((t) => {
+  transactions.filter((t) => t.accountId === accountId && t.currency === currency && t.type !== 'refund').forEach((t) => {
     const d = new Date(t.occurredAt + 'T00:00:00');
     const diffDays = Math.round((today - d) / 86400000);
     if (diffDays >= 0 && diffDays < days) buckets[days - 1 - diffDays] += t.amount;
@@ -445,10 +458,11 @@ function renderAccountGrid() {
       ? currencies.map((cur) => {
           const b = bal[cur];
           const withdrawn = lifetimeWithdrawn(acc.id, cur);
+          const refundedLine = b.refunded > 0 ? ` &middot; refunded ${fmt(b.refunded, cur)}` : '';
           return `<div>
-            <div class="balance-row"><span class="cur">${cur}</span><span class="amt">${fmt(b.available, cur)}</span></div>
+            <div class="balance-row"><span class="cur">${cur}</span><span class="amt ${b.available < 0 ? 'negative' : ''}">${fmt(b.available, cur)}</span></div>
             ${renderSparkline(sparklineData(acc.id, cur))}
-            <div class="balance-row"><span class="sub">${b.count} pending &middot; lifetime ${fmt(b.lifetime, cur)}</span><span class="sub">withdrawn ${fmt(withdrawn, cur)}</span></div>
+            <div class="balance-row"><span class="sub">${b.count} pending &middot; lifetime ${fmt(b.lifetime, cur)}${refundedLine}</span><span class="sub">withdrawn ${fmt(withdrawn, cur)}</span></div>
             ${b.available > 0 ? `<button class="btn btn-ghost" style="width:100%;margin-top:2px;" data-withdraw-account="${acc.id}" data-withdraw-currency="${cur}" data-withdraw-gross="${b.available}">Withdraw ${cur}</button>` : ''}
           </div>`;
         }).join('<div style="height:1px;background:var(--border-color);margin:2px 0;"></div>')
@@ -539,26 +553,28 @@ function renderFeedRow(item) {
     const t = item.data;
     const acc = accountById(t.accountId);
     const withdrawn = !!t.withdrawalId;
-    // Auto-captured amounts came straight from Stripe/PayPal and are already
-    // confirmed -- editing them would let the ledger silently drift from what
-    // was actually received, so they're never editable, withdrawn or not.
-    // Delete stays available (not amount-editable) in case a payment was ever
-    // mismatched to the wrong account.
+    const isRefund = t.type === 'refund';
+    // Auto-captured rows -- deposits and refunds alike -- mirror what
+    // Stripe/PayPal actually reported. Editing OR deleting them would let the
+    // ledger silently drift from reality, so neither action is offered,
+    // withdrawn or not. Manual entries keep both, same as always.
     const autoCaptured = t.source !== 'manual';
+    const editable = !withdrawn && !autoCaptured;
+    const deletable = !withdrawn && !autoCaptured;
     const confirming = deleteConfirmId === t.id;
     const sourceTag = t.source === 'manual' ? '<span class="tag source-manual">&#9998; Manual</span>' : '<span class="tag source-auto">&#9889; Auto</span>';
+    const kindTag = isRefund ? '<span class="tag warning">&#8617; Refund</span>' : '';
     const amountTitle = withdrawn ? '' : (autoCaptured ? 'title="Confirmed by Stripe/PayPal -- not editable"' : '');
+    const displayAmount = isRefund ? -t.amount : t.amount;
     return `<div class="feed-row">
       <div class="feed-left">
-        <span class="who">${escapeHtml(acc ? acc.name : 'Unknown')} ${sourceTag}</span>
+        <span class="who">${escapeHtml(acc ? acc.name : 'Unknown')} ${sourceTag}${kindTag}</span>
         <span class="meta">${fmtDate(t.occurredAt)}${t.note ? ' &middot; ' + escapeHtml(t.note) : ''}</span>
       </div>
       <div class="feed-right">
-        <span class="feed-amount deposit ${withdrawn ? 'locked' : ''}" ${amountTitle}>${fmt(t.amount, t.currency)}</span>
-        ${!withdrawn ? `
-          ${!autoCaptured ? `<button class="icon-btn edit-btn" data-id="${t.id}" title="Edit">&#9998;</button>` : ''}
-          <button class="icon-btn delete-btn ${confirming ? 'confirming' : ''}" data-id="${t.id}" title="Delete">${confirming ? 'Confirm' : '&#10005;'}</button>
-        ` : ''}
+        <span class="feed-amount ${isRefund ? 'refund' : 'deposit'} ${withdrawn ? 'locked' : ''}" ${amountTitle}>${fmt(displayAmount, t.currency)}</span>
+        ${editable ? `<button class="icon-btn edit-btn" data-id="${t.id}" title="Edit">&#9998;</button>` : ''}
+        ${deletable ? `<button class="icon-btn delete-btn ${confirming ? 'confirming' : ''}" data-id="${t.id}" title="Delete">${confirming ? 'Confirm' : '&#10005;'}</button>` : ''}
       </div>
     </div>`;
   }
@@ -616,6 +632,8 @@ function renderFeed() {
   container.querySelectorAll('.delete-btn').forEach((btn) => {
     btn.addEventListener('click', async () => {
       const id = btn.dataset.id;
+      const t = transactions.find((x) => x.id === id);
+      if (t && t.source !== 'manual') { showToast('Auto-captured entries can\'t be deleted'); return; }
       if (deleteConfirmId === id) {
         deleteConfirmId = null;
         await storageAdapter.deleteTransaction(id);
@@ -764,13 +782,18 @@ $('withdrawConfirm').addEventListener('click', async () => {
   const fxRateUsed = convertCurrency(1, currency, payoutCurrency);
   const payoutNet = net * fxRateUsed;
 
+  // Covers every pending row, deposits AND refunds alike -- both get tagged
+  // with this withdrawal so neither is double-counted in future balances.
+  // transactionCount only counts deposits though, since that's what reads
+  // naturally as "N payments" in the withdrawal history.
   const covered = transactions.filter((t) => t.accountId === accountId && t.currency === currency && !t.withdrawalId);
   const coveredIds = covered.map((t) => t.id);
+  const coveredDepositCount = covered.filter((t) => t.type !== 'refund').length;
 
   const withdrawal = {
     id: uid(), accountId, currency, gross, commissionPct: pct, commissionAmt, net,
     payoutCurrency, payoutNet, fxRateUsed,
-    transactionCount: covered.length, createdAt: new Date().toISOString()
+    transactionCount: coveredDepositCount, createdAt: new Date().toISOString()
   };
 
   await storageAdapter.processWithdrawal(withdrawal, coveredIds);
@@ -851,7 +874,9 @@ $('exportCsvBtn').addEventListener('click', () => {
   const rows = [['Type', 'Date', 'Account', 'Provider', 'Amount', 'Currency', 'Source/Detail', 'Note', 'Status']];
   transactions.forEach((t) => {
     const acc = accountById(t.accountId);
-    rows.push(['Deposit', t.occurredAt, acc ? acc.name : 'Unknown', acc ? providerLabel(acc.provider) : '', t.amount.toFixed(2), t.currency, t.source, t.note || '', t.withdrawalId ? 'Withdrawn' : 'Available']);
+    const isRefund = t.type === 'refund';
+    const csvAmount = isRefund ? -t.amount : t.amount;
+    rows.push([isRefund ? 'Refund' : 'Deposit', t.occurredAt, acc ? acc.name : 'Unknown', acc ? providerLabel(acc.provider) : '', csvAmount.toFixed(2), t.currency, t.source, t.note || '', t.withdrawalId ? 'Withdrawn' : 'Available']);
   });
   withdrawals.forEach((w) => {
     const acc = accountById(w.accountId);
