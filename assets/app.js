@@ -59,6 +59,14 @@ const todayISO = () => {
   const d = new Date();
   return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
 };
+const timeAgo = (iso) => {
+  const mins = Math.round((Date.now() - new Date(iso).getTime()) / 60000);
+  if (mins < 1) return 'just now';
+  if (mins < 60) return `${mins}m ago`;
+  const hours = Math.round(mins / 60);
+  if (hours < 24) return `${hours}h ago`;
+  return `${Math.round(hours / 24)}d ago`;
+};
 function escapeHtml(str) {
   const div = document.createElement('div');
   div.textContent = str == null ? '' : String(str);
@@ -243,7 +251,12 @@ const storageAdapter = {
         return data.map((a) => ({
           id: a.id, name: a.name, provider: a.provider, paymentLink: a.payment_link,
           stripePaymentLinkId: a.stripe_payment_link_id, paypalPayeeEmail: a.paypal_payee_email,
-          defaultCurrency: a.default_currency, archived: a.archived, sortOrder: a.sort_order, createdAt: a.created_at
+          defaultCurrency: a.default_currency, archived: a.archived, sortOrder: a.sort_order, createdAt: a.created_at,
+          // Written only by the *-sync Edge Functions (real Stripe/PayPal
+          // balance), never by the client -- so there's no rowFromAccount
+          // counterpart for these.
+          balanceAvailable: a.balance_available != null ? Number(a.balance_available) : null,
+          balanceCurrency: a.balance_currency, balanceSyncedAt: a.balance_synced_at
         }));
       } catch (e) {
         console.warn('Cloud read for accounts failed, using local cache:', e);
@@ -262,7 +275,11 @@ const storageAdapter = {
           id: t.id, accountId: t.account_id, type: t.type, source: t.source, amount: Number(t.amount),
           currency: t.currency, note: t.note || '', externalRef: t.external_ref,
           relatedTransactionId: t.related_transaction_id, withdrawalId: t.withdrawal_id,
-          occurredAt: t.occurred_at, createdAt: t.created_at
+          occurredAt: t.occurred_at, createdAt: t.created_at,
+          // Backfilled by stripe-sync from Stripe's own Balance Transactions
+          // API -- null until synced at least once.
+          providerFee: t.provider_fee != null ? Number(t.provider_fee) : null,
+          providerNet: t.provider_net != null ? Number(t.provider_net) : null
         }));
       } catch (e) {
         console.warn('Cloud read for transactions failed, using local cache:', e);
@@ -594,6 +611,16 @@ function renderAccountGrid() {
       ? `<button class="copy-link-btn" data-copy-account="${acc.id}" title="Copy payment link">🔗</button>`
       : `<span class="copy-link-btn copy-link-btn--static" title="No payment link -- invoiced manually">Invoice</span>`;
 
+    // Real balance from Stripe's own API, as opposed to `b.available` above
+    // (our own sum of unwithdrawn transactions) -- shown side by side so a
+    // mismatch between the two is visible rather than silently trusted.
+    const syncAction = acc.provider === 'stripe'
+      ? `<button class="icon-btn" data-sync-account="${acc.id}" title="Sync real balance/fees/payouts from Stripe">⟳</button>`
+      : '';
+    const balanceSyncLine = acc.provider === 'stripe' && acc.balanceAvailable != null
+      ? `<div class="account__sync">Stripe reports ${fmt(acc.balanceAvailable, acc.balanceCurrency)} available &middot; synced ${timeAgo(acc.balanceSyncedAt)}</div>`
+      : '';
+
     return `<article class="account ${acc.archived ? 'is-archived' : ''}">
       <div class="account__head">
         <div class="account__title">
@@ -605,9 +632,11 @@ function renderAccountGrid() {
         </div>
         <div class="account__actions">
           ${linkAction}
+          ${syncAction}
           <button class="icon-btn" data-edit-account="${acc.id}" title="Edit account">✎</button>
         </div>
       </div>
+      ${balanceSyncLine}
       <div class="account__balances">${balanceBlocks}</div>
     </article>`;
   }).join('');
@@ -618,9 +647,59 @@ function renderAccountGrid() {
   grid.querySelectorAll('[data-edit-account]').forEach((btn) => {
     btn.addEventListener('click', () => openAccountModal(btn.dataset.editAccount));
   });
+  grid.querySelectorAll('[data-sync-account]').forEach((btn) => {
+    btn.addEventListener('click', () => syncStripeAccount(btn.dataset.syncAccount, btn));
+  });
   grid.querySelectorAll('[data-copy-account]').forEach((btn) => {
     btn.addEventListener('click', () => copyAccountLink(btn));
   });
+}
+
+// Calls the stripe-sync Edge Function, which pulls real balance/fee/payout
+// data from Stripe's own API (see supabase/functions/stripe-sync) -- this is
+// a genuinely different credential than the webhook signing secret the app
+// already had, so accounts without a key configured get a clear error
+// instead of a silent no-op. Realtime subscriptions (see init()) would
+// eventually pick up the resulting writes on their own, but re-fetching here
+// means the UI updates immediately without depending on Realtime being
+// enabled for these tables.
+async function syncStripeAccount(accountId, btn) {
+  if (!supabaseClient) { showToast('Sync needs Supabase to be connected'); return; }
+  const original = btn.textContent;
+  btn.textContent = '…';
+  btn.disabled = true;
+  try {
+    const { data, error } = await supabaseClient.functions.invoke('stripe-sync', { body: { accountId } });
+    if (error) {
+      // On a non-2xx response, supabase-js puts it in `error` (not `data`)
+      // and only exposes the actual JSON body -- where our function's real
+      // message lives -- via `error.context`, a raw Response object.
+      let message = error.message;
+      if (error.context && typeof error.context.json === 'function') {
+        try {
+          const body = await error.context.json();
+          if (body?.error) message = body.error;
+        } catch { /* body wasn't JSON -- fall back to the generic message */ }
+      }
+      throw new Error(message);
+    }
+    if (data?.error) throw new Error(data.error);
+
+    accounts = await storageAdapter.getAccounts();
+    transactions = await storageAdapter.getTransactions();
+    withdrawals = await storageAdapter.getWithdrawals();
+    renderAll();
+
+    const parts = [];
+    if (data?.feesBackfilled) parts.push(`${data.feesBackfilled} fee${data.feesBackfilled === 1 ? '' : 's'} backfilled`);
+    if (data?.newWithdrawals) parts.push(`${data.newWithdrawals} payout${data.newWithdrawals === 1 ? '' : 's'} reconciled`);
+    showToast(parts.length ? `Synced — ${parts.join(', ')}` : 'Synced — no changes');
+  } catch (e) {
+    showToast(`Stripe sync failed: ${e.message || e}`);
+  } finally {
+    btn.textContent = original;
+    btn.disabled = false;
+  }
 }
 
 function copyAccountLink(btn) {
@@ -972,7 +1051,12 @@ function renderWithdrawChecklist() {
       const fx = payoutCurrency !== currency
         ? ` <span class="withdraw-row__fx">≈ ${fmt(convertCurrency(displayAmount, currency, payoutCurrency), payoutCurrency)}</span>`
         : '';
-      const metaLine = `${fmtDate(t.occurredAt)}${isRefund ? ' · Refund' : ''}${t.source === 'manual' ? ' · Manual' : ' · Auto-captured'}`;
+      // provider_net (from stripe-sync) is what actually became available
+      // after Stripe's own cut -- worth surfacing right on the row since
+      // that's the number that has to reconcile against your Stripe balance,
+      // not the full charge amount.
+      const feeLine = !isRefund && t.providerNet != null ? ` · net ${fmt(t.providerNet, currency)} after fees` : '';
+      const metaLine = `${fmtDate(t.occurredAt)}${isRefund ? ' · Refund' : ''}${t.source === 'manual' ? ' · Manual' : ' · Auto-captured'}${feeLine}`;
       return `<label class="withdraw-row">
         <input type="checkbox" data-withdraw-row="${t.id}" ${selected.has(t.id) ? 'checked' : ''}>
         <span class="withdraw-row__meta"><span><b>${fmt(displayAmount, currency)}</b>${fx}</span><span>${metaLine}</span></span>
@@ -998,6 +1082,22 @@ function recalcWithdrawGross() {
   }, 0);
   pendingWithdraw.gross = gross;
   $('withdrawSelectedCount').textContent = ` (${selected.size}/${pending.length})`;
+
+  // Only meaningful once stripe-sync has backfilled provider_net on at least
+  // one selected row -- null (not 0) for an unsynced account means "unknown,"
+  // not "no fee," so the row stays hidden rather than showing a misleading 0.
+  const selectedRows = pending.filter((t) => selected.has(t.id));
+  const feeRow = $('withdrawFeeNetRow');
+  if (selectedRows.some((t) => t.providerNet != null)) {
+    const netTotal = selectedRows.reduce((sum, t) => {
+      const net = t.providerNet ?? t.amount; // rows not yet synced fall back to full amount
+      return t.type === 'refund' ? sum - t.amount : sum + net;
+    }, 0);
+    $('withdrawFeeNetValue').textContent = fmt(netTotal, pendingWithdraw.currency);
+    feeRow.style.display = 'flex';
+  } else {
+    feeRow.style.display = 'none';
+  }
 
   const typed = parseFloat($('withdrawReceivedAmount').value);
   const note = $('withdrawAutoSelectNote');

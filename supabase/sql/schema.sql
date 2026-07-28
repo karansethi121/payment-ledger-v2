@@ -22,7 +22,13 @@ create table accounts (
   default_currency text not null default 'USD',
   archived boolean not null default false,   -- soft delete: never hard-delete an account with history
   sort_order integer not null default 0,
-  created_at timestamptz not null default now()
+  created_at timestamptz not null default now(),
+  -- Set by the *-sync Edge Functions (stripe-sync, later paypal-sync) which
+  -- call the provider's own Balance API -- this is what's actually sitting
+  -- in Stripe/PayPal, not our own computed sum of unwithdrawn transactions.
+  balance_available numeric(14,2),
+  balance_currency text,
+  balance_synced_at timestamptz
 );
 
 create table withdrawals (
@@ -37,8 +43,15 @@ create table withdrawals (
   payout_net numeric(14,2) not null,    -- net converted into payout_currency (equals `net` when not converted)
   fx_rate_used numeric(14,6) not null default 1,  -- rate applied at withdrawal time, kept for audit even if FX Rates later change
   transaction_count integer not null default 0,
-  created_at timestamptz not null default now()
+  created_at timestamptz not null default now(),
+  -- Set only for withdrawals a *-sync Edge Function auto-created from a real
+  -- provider payout (as opposed to one you built by hand in the withdraw
+  -- modal) -- provider_payout_id makes re-running sync idempotent (a payout
+  -- Stripe/PayPal already reported once is never recorded twice).
+  provider text check (provider in ('stripe', 'paypal')),
+  provider_payout_id text
 );
+create unique index withdrawals_provider_payout_id_idx on withdrawals(provider_payout_id) where provider_payout_id is not null;
 
 -- Deposits AND refunds/chargebacks live here, both as positive magnitudes --
 -- `type` determines whether a row adds to or subtracts from the running
@@ -65,7 +78,13 @@ create table transactions (
   related_transaction_id text references transactions(id),  -- for refunds: the original deposit being corrected, if it could be matched
   withdrawal_id text references withdrawals(id),  -- set once this row is folded into a withdrawal; null = still pending
   occurred_at date not null default current_date,
-  created_at timestamptz not null default now()
+  created_at timestamptz not null default now(),
+  -- Backfilled by stripe-sync (later paypal-sync) from the provider's own
+  -- Balance Transactions API -- what the processor actually took and what was
+  -- actually left over, as opposed to `amount` which is the full charge. Null
+  -- until synced at least once.
+  provider_fee numeric(14,2),
+  provider_net numeric(14,2)
 );
 
 create index transactions_account_idx on transactions(account_id);

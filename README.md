@@ -47,6 +47,16 @@ same purpose (accounts, payment links, a ledger, cashing out) but a different co
   live DB, and to `schema.sql` for future deployments) lets the frontend show a per-account
   "webhook error" / "Nd since webhook" / "no webhook activity" flag, separate from the
   general activity-based stale warning.
+- **Stripe balance/fee/payout sync**: `stripe-sync` (new Edge Function) pulls real data
+  straight from Stripe's own API on demand -- the ⟳ button on a Stripe account card. It (1)
+  writes Stripe's actual available balance onto the account card, (2) backfills the real
+  fee/net Stripe took per charge (shown in the withdraw modal, since the full charge amount
+  was never what actually became available), and (3) reads Stripe's payout history and,
+  since a payout's own `balance_transactions` list tells you *exactly* which charges it
+  covered, auto-creates and tags the matching `withdrawals` row -- no manual checklist
+  needed once a real payout has happened. Requires a **separate credential from the
+  webhook secret** -- see its own section below. Not yet built for PayPal; same approach
+  (Transaction Search / Reporting API) should carry over once Stripe's is verified working.
 
 Since Karan Sethi and United Goods UK are **separate Stripe accounts** (not two Payment
 Links under one account), the Stripe function doesn't match by Payment Link ID -- each
@@ -62,6 +72,28 @@ supabase secrets set STRIPE_ACCOUNTS_JSON='[{"accountId":"karan-stripe","secret"
 `ugu-stripe`). To add another Stripe account later: create its webhook endpoint in that
 Stripe account's own dashboard pointing at the same function URL, get its signing secret,
 and add another `{accountId, secret}` entry to the JSON array.
+
+### Setting up `stripe-sync` (real balance/fee/payout data)
+
+`STRIPE_ACCOUNTS_JSON` above only holds a **webhook signing secret** (`whsec_...`) --
+enough to verify that an event really came from Stripe, but not enough to call Stripe's
+Balance, Balance Transactions, or Payouts APIs. `stripe-sync` needs a real API key per
+Stripe account, stored in its own secret so the webhook-verification secret and the
+account-access key stay separate:
+
+```bash
+supabase secrets set STRIPE_API_KEYS_JSON='[{"accountId":"karan-stripe","apiKey":"rk_live_..."},{"accountId":"ugu-stripe","apiKey":"rk_live_..."}]'
+supabase functions deploy stripe-sync --no-verify-jwt
+```
+
+Use a **restricted key** (Stripe Dashboard -> Developers -> API keys -> Create restricted
+key), not the full secret key -- read-only access to **Balance**, **Balance transactions**,
+and **Payouts** is all this function ever calls. Same `accountId` values as
+`STRIPE_ACCOUNTS_JSON`, one entry per Stripe account. Run the migration in
+[`supabase/sql/migrations/0002_stripe_sync.sql`](supabase/sql/migrations/0002_stripe_sync.sql)
+against the database first (`supabase/sql/schema.sql` already has these columns inline for
+a brand-new project). Unlike the webhook functions, this one is called by the browser, not
+by Stripe, so `--no-verify-jwt` is what lets the anon-key frontend invoke it directly.
 
 ## Setting this up from scratch (a new deployment)
 
@@ -145,6 +177,8 @@ index.html                          Dashboard shell
 assets/style.css                    Styles
 assets/app.js                       All frontend logic (storage adapter, rendering, modals)
 supabase/sql/schema.sql             Database schema for a new Supabase project
+supabase/sql/migrations/            Incremental changes to apply to an already-deployed DB
 supabase/functions/stripe-webhook/  Auto-capture from Stripe
 supabase/functions/paypal-webhook/  Auto-capture from PayPal
+supabase/functions/stripe-sync/     On-demand real balance/fee/payout sync from Stripe's API
 ```

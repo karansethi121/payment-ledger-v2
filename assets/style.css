@@ -152,6 +152,10 @@ h1, h2, h3, p { margin: 0; }
   letter-spacing: .02em;
 }
 .is-warn { color: var(--ochre); }
+.account__sync {
+  font-family: var(--font-mono); font-size: 11px; color: var(--pine); margin-top: 8px;
+  letter-spacing: .02em;
+}
 .account__actions { display: flex; gap: 6px; flex-shrink: 0; }
 
 .account__balances { display: flex; flex-direction: column; }
