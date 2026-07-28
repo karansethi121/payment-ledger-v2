@@ -66,6 +66,7 @@ Deno.serve(async (req) => {
   const { error: dedupeError } = await supabase.from("webhook_events").insert({
     provider: "stripe",
     external_event_id: event.id,
+    account_id: matchedAccountId,
     payload: event,
   });
   if (dedupeError) {

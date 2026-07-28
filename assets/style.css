@@ -151,7 +151,7 @@ h1, h2, h3, p { margin: 0; }
   font-family: var(--font-mono); font-size: 11px; color: var(--ink-muted); margin-top: 5px;
   letter-spacing: .02em;
 }
-.account__meta .is-warn { color: var(--ochre); }
+.is-warn { color: var(--ochre); }
 .account__actions { display: flex; gap: 6px; flex-shrink: 0; }
 
 .account__balances { display: flex; flex-direction: column; }
@@ -217,7 +217,7 @@ h1, h2, h3, p { margin: 0; }
 .feed-row:last-child { border-bottom: none; }
 .feed-row__left { display: flex; flex-direction: column; gap: 3px; min-width: 0; }
 .feed-row__who { font-weight: 600; font-size: 14px; color: var(--ink); }
-.feed-row__meta { font-family: var(--font-mono); font-size: 11px; color: var(--ink-muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.feed-row__meta { font-family: var(--font-mono); font-size: 11px; color: var(--ink-muted); line-height: 1.5; }
 .feed-row__right { display: flex; align-items: center; gap: 8px; flex-shrink: 0; }
 .feed-amount { font-family: var(--font-mono); font-size: 15px; font-weight: 700; }
 .feed-amount.deposit { color: var(--pine); }
@@ -225,9 +225,17 @@ h1, h2, h3, p { margin: 0; }
 .feed-amount.withdrawal { color: var(--ink-soft); }
 .feed-amount.locked::after { content: ' 🔒'; font-size: 9px; opacity: .6; }
 
-/* ================= Data ================= */
+/* ================= Data & Reports ================= */
 .data-panel { background: var(--paper-raised); border: 1px solid var(--rule); border-radius: var(--radius-md); padding: 16px; box-shadow: var(--shadow-card); }
 .data-row { display: flex; gap: 8px; flex-wrap: wrap; }
+
+.report-row { display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 11px 0; border-bottom: 1px solid var(--rule); flex-wrap: wrap; }
+.report-row:last-child { border-bottom: none; }
+.report-row__label { font-size: 13px; color: var(--ink-muted); }
+.report-row__value { font-family: var(--font-mono); font-size: 15px; font-weight: 700; color: var(--ink); display: flex; align-items: baseline; gap: 8px; }
+.report-row__delta { font-family: var(--font-display); font-size: 11px; font-weight: 600; }
+.report-row__delta.is-up { color: var(--pine); }
+.report-row__delta.is-down { color: var(--ink-muted); }
 
 /* ================= Empty states ================= */
 .empty-state { text-align: center; padding: 48px 20px; color: var(--ink-muted); background: var(--paper-raised); border: 1px solid var(--rule); border-radius: var(--radius-lg); }

@@ -93,6 +93,7 @@ Deno.serve(async (req) => {
   const { error: dedupeError } = await supabase.from("webhook_events").insert({
     provider: "paypal",
     external_event_id: webhookEvent.id,
+    account_id: matchedAccountId,
     payload: webhookEvent,
   });
   if (dedupeError) {

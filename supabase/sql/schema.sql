@@ -73,16 +73,24 @@ create index transactions_withdrawal_idx on transactions(withdrawal_id);
 
 -- Idempotency + audit log for inbound webhooks. The unique constraint is what
 -- stops a Stripe/PayPal retry from double-counting the same payment.
+-- account_id is set once signature verification identifies which account the
+-- event belongs to (nullable: verification-failed events are still logged
+-- for audit purposes but obviously can't be attributed) -- this is what
+-- powers the frontend's per-account webhook health indicator, since a
+-- handler that throws after verification still leaves a row here (with
+-- `error` set) even though it never produced a transaction.
 create table webhook_events (
   id uuid primary key default gen_random_uuid(),
   provider text not null check (provider in ('stripe', 'paypal')),
   external_event_id text not null,
+  account_id text references accounts(id),
   payload jsonb not null,
   processed boolean not null default false,
   error text,
   received_at timestamptz not null default now(),
   unique (provider, external_event_id)
 );
+create index webhook_events_account_idx on webhook_events(account_id);
 
 -- Balances are always computed from the ledger, never stored/mutated directly.
 -- (app.js recomputes the same thing client-side; this view exists so you can

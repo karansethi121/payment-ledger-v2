@@ -20,6 +20,10 @@ same purpose (accounts, payment links, a ledger, cashing out) but a different co
   manually-entered rows can be edited or deleted.
 - **One dashboard** — balances, a 14-day trend per account, and a unified activity feed,
   instead of three separate tabs.
+- **Webhook health, not just account activity** — `webhook_events` logs every verified
+  delivery per account (including ones whose handler errored after verification), so a
+  broken webhook shows up as its own warning distinct from "this account just hasn't had
+  a sale in a while."
 
 ## Current status (this deployment)
 
@@ -34,10 +38,15 @@ same purpose (accounts, payment links, a ledger, cashing out) but a different co
   fixing two webhooks that had never actually been subscribed on PayPal's side (the
   IDs given initially didn't correspond to real, saved webhooks).
 - **Refunds/chargebacks**: code deployed (`charge.refunded` + `charge.dispute.funds_withdrawn`
-  for Stripe, `PAYMENT.CAPTURE.REFUNDED` for PayPal) but **not yet subscribed to in either
-  dashboard** -- the original webhook setup only requested the completed-payment event.
-  Add the extra event type(s) to each existing webhook endpoint (don't need new endpoints,
-  just add the event to the existing subscription) to activate this.
+  for Stripe, `PAYMENT.CAPTURE.REFUNDED` for PayPal), and **all webhook endpoints -- both
+  Stripe and PayPal -- are now subscribed to the extra event types.** Not yet exercised
+  against a real refund on either provider, so treat as wired-but-unverified until one
+  actually happens; the per-account webhook health indicator will confirm it either way
+  once it does.
+- **Webhook health monitoring**: `webhook_events.account_id` (added directly against the
+  live DB, and to `schema.sql` for future deployments) lets the frontend show a per-account
+  "webhook error" / "Nd since webhook" / "no webhook activity" flag, separate from the
+  general activity-based stale warning.
 
 Since Karan Sethi and United Goods UK are **separate Stripe accounts** (not two Payment
 Links under one account), the Stripe function doesn't match by Payment Link ID -- each

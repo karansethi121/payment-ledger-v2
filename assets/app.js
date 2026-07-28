@@ -19,8 +19,10 @@ let activeFeedFilter = 'all';
 let feedSearchQuery = '';
 let feedDateFrom = '';
 let feedDateTo = '';
+let webhookHealth = {}; // accountId -> { lastReceivedAt, lastError }
 
 const STALE_DAYS_THRESHOLD = 14;
+const WEBHOOK_QUIET_DAYS_THRESHOLD = 4; // tighter than STALE_DAYS_THRESHOLD -- webhook silence is a more specific signal than "no sales lately"
 
 // Live FX reference: "1 unit of CUR = ? USD", fetched from Frankfurter (ECB
 // reference rates) and cached in localStorage so the app still has *a* rate
@@ -290,6 +292,30 @@ const storageAdapter = {
     return val ? JSON.parse(val) : [];
   },
 
+  // Purely observational (never written to from the client), so there's no
+  // local cache/outbox path here -- if this fails, the health indicator just
+  // doesn't show rather than blocking anything else.
+  async getWebhookHealth() {
+    if (!supabaseClient) return {};
+    try {
+      const { data, error } = await supabaseClient
+        .from('webhook_events')
+        .select('account_id, received_at, error')
+        .not('account_id', 'is', null)
+        .order('received_at', { ascending: false })
+        .limit(300);
+      if (error) throw error;
+      const health = {};
+      (data || []).forEach((row) => {
+        if (!health[row.account_id]) health[row.account_id] = { lastReceivedAt: row.received_at, lastError: row.error };
+      });
+      return health;
+    } catch (e) {
+      console.warn('Webhook health fetch failed:', e);
+      return {};
+    }
+  },
+
   async addAccount(acc) {
     accounts.push(acc);
     localStorage.setItem(LS_ACCOUNTS, JSON.stringify(accounts));
@@ -352,9 +378,11 @@ function lifetimeWithdrawn(accountId, currency) {
   return withdrawals.filter((w) => w.accountId === accountId && w.currency === currency).reduce((s, w) => s + w.gross, 0);
 }
 
-// Flags an account that's gone quiet -- catches a broken webhook before you
-// notice by accident. Only fires for accounts with prior history (a brand new
-// account with zero payments isn't "stale", it's just new).
+// Flags an account with no payment activity (manual or auto) in a while --
+// a general "this looks quiet" signal. Only fires for accounts with prior
+// history (a brand new account with zero payments isn't "stale", it's just
+// new). webhookHealthTag below is the sharper, webhook-specific version of
+// this same idea.
 function staleWarningTag(acc) {
   if (acc.archived) return '';
   const accTx = transactions.filter((t) => t.accountId === acc.id);
@@ -363,6 +391,33 @@ function staleWarningTag(acc) {
   const days = Math.round((new Date(todayISO() + 'T00:00:00') - new Date(lastDate + 'T00:00:00')) / 86400000);
   if (days > STALE_DAYS_THRESHOLD) {
     return `<span class="is-warn" title="Last payment ${fmtDate(lastDate)}">${days}d quiet</span>`;
+  }
+  return '';
+}
+
+// Catches a broken webhook specifically, as distinct from "just no sales" --
+// webhook_events logs every verified delivery regardless of whether it
+// produced a transaction, including ones where the handler threw after
+// verification (error is set but no transaction resulted). That makes this a
+// tighter, more specific signal than staleWarningTag: it can go off even for
+// an account that's still getting real payments some other way, and it uses
+// a shorter threshold since webhook silence is suspicious sooner than "no
+// sales" is.
+function webhookHealthTag(acc) {
+  if (acc.archived) return '';
+  if (acc.provider !== 'stripe' && acc.provider !== 'paypal') return '';
+  const health = webhookHealth[acc.id];
+  const accountAgeDays = Math.round((new Date() - new Date(acc.createdAt)) / 86400000);
+  if (!health) {
+    if (accountAgeDays < 2) return ''; // hasn't had a realistic chance to receive one yet
+    return `<span class="is-warn" title="No webhook deliveries recorded for this account">no webhook activity</span>`;
+  }
+  if (health.lastError) {
+    return `<span class="is-warn" title="${escapeHtml(health.lastError)}">webhook error</span>`;
+  }
+  const days = Math.round((new Date() - new Date(health.lastReceivedAt)) / 86400000);
+  if (days > WEBHOOK_QUIET_DAYS_THRESHOLD) {
+    return `<span class="is-warn" title="Last webhook received ${fmtDate(health.lastReceivedAt.slice(0, 10))}">${days}d since webhook</span>`;
   }
   return '';
 }
@@ -531,6 +586,8 @@ function renderAccountGrid() {
     if (acc.archived) flags.push('Archived');
     const staleFlag = staleWarningTag(acc);
     if (staleFlag) flags.push(staleFlag);
+    const webhookFlag = webhookHealthTag(acc);
+    if (webhookFlag) flags.push(webhookFlag);
     const metaFlags = flags.map((f) => ` &middot; ${f}`).join('');
 
     const linkAction = acc.paymentLink
@@ -636,6 +693,13 @@ function renderFeedRow(item) {
     // second badge repeating that was just noise competing for attention.
     const metaBits = [fmtDate(t.occurredAt), t.source === 'manual' ? 'Manual' : 'Auto-captured'];
     if (isRefund) metaBits.push('Refund');
+    // A manual entry on an account that's wired for auto-capture is worth a
+    // second look -- normally that account's payments should arrive via
+    // webhook, so this could mean one was missed (or it's a deliberate
+    // exception, e.g. a phone order) rather than the expected path.
+    if (t.source === 'manual' && !isRefund && acc && (acc.provider === 'stripe' || acc.provider === 'paypal')) {
+      metaBits.push(`<span class="is-warn" title="${escapeHtml(acc.name)} is wired for auto-capture -- double check this wasn't also captured by a webhook">missed webhook?</span>`);
+    }
     if (t.note) metaBits.push(escapeHtml(t.note));
     const amountTitle = withdrawn ? '' : (autoCaptured ? 'title="Confirmed by Stripe/PayPal -- not editable"' : '');
     const displayAmount = isRefund ? -t.amount : t.amount;
@@ -666,8 +730,13 @@ function renderFeedRow(item) {
   </div>`;
 }
 
-function renderFeed() {
-  const container = $('feedContent');
+// Shared by both the on-screen feed and CSV export -- "what you see is what
+// you export" instead of the export silently ignoring whatever you've
+// filtered down to.
+function feedFiltersActive() {
+  return activeFeedFilter !== 'all' || !!feedDateFrom || !!feedDateTo || !!feedSearchQuery.trim();
+}
+function getFilteredFeedItems() {
   let items = [];
   transactions.forEach((t) => items.push({ kind: 'deposit', date: t.occurredAt, ts: t.createdAt, data: t }));
   withdrawals.forEach((w) => items.push({ kind: 'withdrawal', date: w.createdAt.slice(0, 10), ts: w.createdAt, data: w }));
@@ -689,8 +758,13 @@ function renderFeed() {
   }
 
   items.sort((a, b) => b.date.localeCompare(a.date) || new Date(b.ts) - new Date(a.ts));
+  return items;
+}
 
-  const filtersActive = activeFeedFilter !== 'all' || feedDateFrom || feedDateTo || query;
+function renderFeed() {
+  const container = $('feedContent');
+  const items = getFilteredFeedItems();
+  const filtersActive = feedFiltersActive();
   if (items.length === 0) {
     container.innerHTML = `<div class="empty-state">
       <div class="glyph">🧾</div><div class="title">${filtersActive ? 'No matching activity' : 'No activity yet'}</div>
@@ -721,11 +795,70 @@ function renderFeed() {
   });
 }
 
+/* ================= Render: reports ================= */
+// This month vs last month (net of refunds, across all accounts) plus
+// lifetime commission paid -- the two figures already fully derivable from
+// data the app has anyway, just never rolled up anywhere.
+function renderReports() {
+  const panel = $('reportsPanel');
+  if (!panel) return;
+
+  const now = new Date();
+  const thisMonthKey = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}`;
+  const prevMonthDate = new Date(now.getFullYear(), now.getMonth() - 1, 1);
+  const lastMonthKey = `${prevMonthDate.getFullYear()}-${String(prevMonthDate.getMonth() + 1).padStart(2, '0')}`;
+
+  const monthTotals = {}; // currency -> { thisMonth, lastMonth }
+  transactions.forEach((t) => {
+    const monthKey = t.occurredAt.slice(0, 7);
+    if (monthKey !== thisMonthKey && monthKey !== lastMonthKey) return;
+    if (!monthTotals[t.currency]) monthTotals[t.currency] = { thisMonth: 0, lastMonth: 0 };
+    const signedAmount = t.type === 'refund' ? -t.amount : t.amount;
+    monthTotals[t.currency][monthKey === thisMonthKey ? 'thisMonth' : 'lastMonth'] += signedAmount;
+  });
+
+  const commissionTotals = {}; // currency -> lifetime commission paid
+  withdrawals.forEach((w) => { commissionTotals[w.currency] = (commissionTotals[w.currency] || 0) + w.commissionAmt; });
+
+  const monthCurrencies = Object.keys(monthTotals);
+  const commissionCurrencies = Object.keys(commissionTotals);
+
+  if (monthCurrencies.length === 0 && commissionCurrencies.length === 0) {
+    panel.innerHTML = `<p style="color:var(--ink-muted);font-size:12.5px;margin:0;">No activity yet to report on.</p>`;
+    return;
+  }
+
+  const monthRows = monthCurrencies.map((cur) => {
+    const { thisMonth, lastMonth } = monthTotals[cur];
+    let delta = '';
+    if (lastMonth !== 0) {
+      const pct = ((thisMonth - lastMonth) / Math.abs(lastMonth)) * 100;
+      delta = `<span class="report-row__delta ${pct >= 0 ? 'is-up' : 'is-down'}">${pct >= 0 ? '▲' : '▼'} ${Math.abs(pct).toFixed(0)}% vs last month</span>`;
+    } else if (thisMonth > 0) {
+      delta = `<span class="report-row__delta is-up">new this month</span>`;
+    }
+    return `<div class="report-row">
+      <span class="report-row__label">This month &middot; ${cur}</span>
+      <span class="report-row__value">${fmt(thisMonth, cur)} ${delta}</span>
+    </div>`;
+  }).join('');
+
+  const commissionRows = commissionCurrencies.map((cur) => `
+    <div class="report-row">
+      <span class="report-row__label">Commission paid &middot; ${cur}</span>
+      <span class="report-row__value">${fmt(commissionTotals[cur], cur)}</span>
+    </div>
+  `).join('');
+
+  panel.innerHTML = monthRows + commissionRows;
+}
+
 function renderAll() {
   renderHero();
   renderAccountGrid();
   renderFeedFilters();
   renderFeed();
+  renderReports();
   updateSyncBanner();
 }
 
@@ -947,25 +1080,32 @@ function csvEscape(val) {
   return /[",\n]/.test(str) ? `"${str.replace(/"/g, '""')}"` : str;
 }
 
+// Exports whatever's currently on screen -- respects the account/date/search
+// filters on the Activity feed rather than always dumping everything, so
+// "what you see is what you export".
 $('exportCsvBtn').addEventListener('click', () => {
   const rows = [['Type', 'Date', 'Account', 'Provider', 'Amount', 'Currency', 'Source/Detail', 'Note', 'Status']];
-  transactions.forEach((t) => {
-    const acc = accountById(t.accountId);
-    const isRefund = t.type === 'refund';
-    const csvAmount = isRefund ? -t.amount : t.amount;
-    rows.push([isRefund ? 'Refund' : 'Deposit', t.occurredAt, acc ? acc.name : 'Unknown', acc ? providerLabel(acc.provider) : '', csvAmount.toFixed(2), t.currency, t.source, t.note || '', t.withdrawalId ? 'Withdrawn' : 'Available']);
+  getFilteredFeedItems().forEach((item) => {
+    if (item.kind === 'deposit') {
+      const t = item.data;
+      const acc = accountById(t.accountId);
+      const isRefund = t.type === 'refund';
+      const csvAmount = isRefund ? -t.amount : t.amount;
+      rows.push([isRefund ? 'Refund' : 'Deposit', t.occurredAt, acc ? acc.name : 'Unknown', acc ? providerLabel(acc.provider) : '', csvAmount.toFixed(2), t.currency, t.source, t.note || '', t.withdrawalId ? 'Withdrawn' : 'Available']);
+    } else {
+      const w = item.data;
+      const acc = accountById(w.accountId);
+      const converted = w.payoutCurrency && w.payoutCurrency !== w.currency;
+      const detail = `${w.transactionCount} payments, ${w.commissionPct}% commission` + (converted ? `, converted from ${w.net.toFixed(2)} ${w.currency} @ ${w.fxRateUsed}` : '');
+      const displayAmount = converted ? w.payoutNet : w.net;
+      const displayCurrency = converted ? w.payoutCurrency : w.currency;
+      rows.push(['Withdrawal', w.createdAt.slice(0, 10), acc ? acc.name : 'Unknown', acc ? providerLabel(acc.provider) : '', displayAmount.toFixed(2), displayCurrency, detail, '', 'Net']);
+    }
   });
-  withdrawals.forEach((w) => {
-    const acc = accountById(w.accountId);
-    const converted = w.payoutCurrency && w.payoutCurrency !== w.currency;
-    const detail = `${w.transactionCount} payments, ${w.commissionPct}% commission` + (converted ? `, converted from ${w.net.toFixed(2)} ${w.currency} @ ${w.fxRateUsed}` : '');
-    const displayAmount = converted ? w.payoutNet : w.net;
-    const displayCurrency = converted ? w.payoutCurrency : w.currency;
-    rows.push(['Withdrawal', w.createdAt.slice(0, 10), acc ? acc.name : 'Unknown', acc ? providerLabel(acc.provider) : '', displayAmount.toFixed(2), displayCurrency, detail, '', 'Net']);
-  });
+  const filtered = feedFiltersActive();
   const csv = rows.map((r) => r.map(csvEscape).join(',')).join('\n');
-  downloadTextFile(`ledger_export_${todayISO()}.csv`, 'text/csv;charset=utf-8', csv);
-  showToast('CSV exported');
+  downloadTextFile(`ledger_export${filtered ? '_filtered' : ''}_${todayISO()}.csv`, 'text/csv;charset=utf-8', csv);
+  showToast(filtered ? 'Filtered CSV exported' : 'CSV exported');
 });
 
 $('exportJsonBtn').addEventListener('click', () => {
@@ -1066,6 +1206,8 @@ function seedDemoData() {
   withdrawals = await storageAdapter.getWithdrawals();
   renderAll();
 
+  storageAdapter.getWebhookHealth().then((health) => { webhookHealth = health; renderAccountGrid(); });
+
   await flushOutbox();
   renderAll();
 
@@ -1093,6 +1235,10 @@ function seedDemoData() {
         accounts = await storageAdapter.getAccounts();
         renderAccountGrid();
         renderAll();
+      })
+      .on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'webhook_events' }, async () => {
+        webhookHealth = await storageAdapter.getWebhookHealth();
+        renderAccountGrid();
       })
       .subscribe();
   }
