@@ -615,14 +615,15 @@ function renderAccountGrid() {
       ? `<button class="copy-link-btn" data-copy-account="${acc.id}" title="Copy payment link">🔗</button>`
       : `<span class="copy-link-btn copy-link-btn--static" title="No payment link -- invoiced manually">Invoice</span>`;
 
-    // Real balance from Stripe's own API, as opposed to `b.available` above
-    // (our own sum of unwithdrawn transactions) -- shown side by side so a
-    // mismatch between the two is visible rather than silently trusted.
-    const syncAction = acc.provider === 'stripe'
-      ? `<button class="icon-btn" data-sync-account="${acc.id}" title="Sync real balance/fees/payouts from Stripe">⟳</button>`
+    // Real balance from Stripe/PayPal's own API, as opposed to `b.available`
+    // above (our own sum of unwithdrawn transactions) -- shown side by side
+    // so a mismatch between the two is visible rather than silently trusted.
+    const syncable = acc.provider === 'stripe' || acc.provider === 'paypal';
+    const syncAction = syncable
+      ? `<button class="icon-btn" data-sync-account="${acc.id}" data-sync-provider="${acc.provider}" title="Sync real balance/fees from ${providerLabel(acc.provider)}">⟳</button>`
       : '';
-    const balanceSyncLine = acc.provider === 'stripe' && acc.balanceAvailable != null
-      ? `<div class="account__sync">Stripe reports ${fmt(acc.balanceAvailable, acc.balanceCurrency)} available &middot; synced ${timeAgo(acc.balanceSyncedAt)}</div>`
+    const balanceSyncLine = syncable && acc.balanceAvailable != null
+      ? `<div class="account__sync">${providerLabel(acc.provider)} reports ${fmt(acc.balanceAvailable, acc.balanceCurrency)} available &middot; synced ${timeAgo(acc.balanceSyncedAt)}</div>`
       : '';
 
     return `<article class="account ${acc.archived ? 'is-archived' : ''}">
@@ -652,28 +653,30 @@ function renderAccountGrid() {
     btn.addEventListener('click', () => openAccountModal(btn.dataset.editAccount));
   });
   grid.querySelectorAll('[data-sync-account]').forEach((btn) => {
-    btn.addEventListener('click', () => syncStripeAccount(btn.dataset.syncAccount, btn));
+    btn.addEventListener('click', () => syncAccount(btn.dataset.syncProvider, btn.dataset.syncAccount, btn));
   });
   grid.querySelectorAll('[data-copy-account]').forEach((btn) => {
     btn.addEventListener('click', () => copyAccountLink(btn));
   });
 }
 
-// Calls the stripe-sync Edge Function, which pulls real balance/fee/payout
-// data from Stripe's own API (see supabase/functions/stripe-sync) -- this is
+// Calls the stripe-sync/paypal-sync Edge Function, which pulls real
+// balance/fee data from the provider's own API (see supabase/functions/) --
 // a genuinely different credential than the webhook signing secret the app
-// already had, so accounts without a key configured get a clear error
-// instead of a silent no-op. Realtime subscriptions (see init()) would
-// eventually pick up the resulting writes on their own, but re-fetching here
-// means the UI updates immediately without depending on Realtime being
-// enabled for these tables.
-async function syncStripeAccount(accountId, btn) {
+// already had, so accounts without one configured get a clear error instead
+// of a silent no-op. Realtime subscriptions (see init()) would eventually
+// pick up the resulting writes on their own, but re-fetching here means the
+// UI updates immediately without depending on Realtime being enabled for
+// these tables. Only stripe-sync ever returns skippedPayouts/newWithdrawals
+// -- paypal-sync doesn't attempt payout reconciliation at all (see its file
+// for why), so those simply stay undefined and are skipped below.
+async function syncAccount(provider, accountId, btn) {
   if (!supabaseClient) { showToast('Sync needs Supabase to be connected'); return; }
   const original = btn.textContent;
   btn.textContent = '…';
   btn.disabled = true;
   try {
-    const { data, error } = await supabaseClient.functions.invoke('stripe-sync', { body: { accountId } });
+    const { data, error } = await supabaseClient.functions.invoke(`${provider}-sync`, { body: { accountId } });
     if (error) {
       // On a non-2xx response, supabase-js puts it in `error` (not `data`)
       // and only exposes the actual JSON body -- where our function's real
@@ -708,7 +711,7 @@ async function syncStripeAccount(accountId, btn) {
     }
     showToast(parts.length ? `Synced — ${parts.join(', ')}` : 'Synced — no changes');
   } catch (e) {
-    showToast(`Stripe sync failed: ${e.message || e}`);
+    showToast(`${providerLabel(provider)} sync failed: ${e.message || e}`);
   } finally {
     btn.textContent = original;
     btn.disabled = false;

@@ -55,8 +55,11 @@ same purpose (accounts, payment links, a ledger, cashing out) but a different co
   since a payout's own `balance_transactions` list tells you *exactly* which charges it
   covered, auto-creates and tags the matching `withdrawals` row -- no manual checklist
   needed once a real payout has happened. Requires a **separate credential from the
-  webhook secret** -- see its own section below. Not yet built for PayPal; same approach
-  (Transaction Search / Reporting API) should carry over once Stripe's is verified working.
+  webhook secret** -- see its own section below.
+- **PayPal balance/fee sync**: `paypal-sync` -- same ⟳ button, real balance + per-capture
+  fee/net, reusing the OAuth credentials `paypal-webhook` already has. Deliberately skips
+  payout reconciliation (see its own section below for why); those still go through the
+  manual withdraw-modal checklist.
 
 Since Karan Sethi and United Goods UK are **separate Stripe accounts** (not two Payment
 Links under one account), the Stripe function doesn't match by Payment Link ID -- each
@@ -103,6 +106,31 @@ disabled by design, see `schema.sql`); anyone holding the anon key (which is pub
 `assets/app.js`, same as every other table in this app) can still call it. What it does add:
 CORS locked to the real site origin, and a one-sync-per-account-per-minute cooldown, so a
 found or reused URL can't be used to hammer Stripe's API on the account's real key.
+
+### Setting up `paypal-sync` (real balance/fee data)
+
+Same idea as `stripe-sync`, deployed the same way (JWT verification, CORS locked to the
+site origin, one-sync-per-minute cooldown):
+
+```bash
+supabase functions deploy paypal-sync
+```
+
+No new secret needed -- it reuses the `clientId`/`clientSecret` already in
+`PAYPAL_ACCOUNTS_JSON` (the same OAuth client-credentials grant `paypal-webhook` already
+uses to verify signatures works for other PayPal REST calls too). What it **does** need:
+the **Transaction Search** API product enabled on each PayPal app (Developer Dashboard ->
+Apps & Credentials -> your app -> Add features -> Transaction Search) -- without it, both
+`/v1/reporting/balances` and `/v2/payments/captures/{id}` return `NOT_AUTHORIZED`, the same
+class of permissions gap `stripe-sync`'s restricted key needed filled in.
+
+**Deliberately does not attempt payout auto-reconciliation.** Stripe exposes
+`balance_transactions?payout=...`, an itemized list of which charges a payout covered (for
+its automatic payout schedule, at least). PayPal has no documented equivalent for "which
+captures were included in this withdrawal to bank" -- a PayPal withdrawal sweeps the
+available balance rather than transferring specific line items. Withdrawals from PayPal
+accounts go through the manual withdraw-modal checklist, same as Stripe's manual-schedule
+payouts already do.
 
 ## Setting this up from scratch (a new deployment)
 
@@ -190,4 +218,5 @@ supabase/sql/migrations/            Incremental changes to apply to an already-d
 supabase/functions/stripe-webhook/  Auto-capture from Stripe
 supabase/functions/paypal-webhook/  Auto-capture from PayPal
 supabase/functions/stripe-sync/     On-demand real balance/fee/payout sync from Stripe's API
+supabase/functions/paypal-sync/     On-demand real balance/fee sync from PayPal's API
 ```
