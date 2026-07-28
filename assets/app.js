@@ -567,7 +567,7 @@ function renderAccountGrid() {
             <div class="balance__row"><span class="balance__cur">${cur}</span><span class="balance__amt ${b.available < 0 ? 'is-negative' : ''}">${fmt(b.available, cur)}</span></div>
             ${renderSparkline(sparklineData(acc.id, cur))}
             <div class="balance__foot"><span>${b.count} pending &middot; lifetime ${fmt(b.lifetime, cur)}${refundedLine}</span><span>withdrawn ${fmt(withdrawn, cur)}</span></div>
-            ${b.available > 0 ? `<button class="btn btn-outline balance__withdraw" data-withdraw-account="${acc.id}" data-withdraw-currency="${cur}" data-withdraw-gross="${b.available}">Withdraw ${cur}</button>` : ''}
+            ${b.available > 0 ? `<button class="btn btn-outline balance__withdraw" data-withdraw-account="${acc.id}" data-withdraw-currency="${cur}">Withdraw ${cur}</button>` : ''}
           </div>`;
         }).join('')
       : `<p style="color:var(--ink-muted);font-size:12.5px;margin:0;padding-top:14px;">No payments yet.</p>`;
@@ -613,7 +613,7 @@ function renderAccountGrid() {
   }).join('');
 
   grid.querySelectorAll('[data-withdraw-account]').forEach((btn) => {
-    btn.addEventListener('click', () => openWithdrawModal(btn.dataset.withdrawAccount, btn.dataset.withdrawCurrency, parseFloat(btn.dataset.withdrawGross)));
+    btn.addEventListener('click', () => openWithdrawModal(btn.dataset.withdrawAccount, btn.dataset.withdrawCurrency));
   });
   grid.querySelectorAll('[data-edit-account]').forEach((btn) => {
     btn.addEventListener('click', () => openAccountModal(btn.dataset.editAccount));
@@ -927,20 +927,124 @@ $('editSave').addEventListener('click', async () => {
 });
 
 /* ================= Modal: withdraw ================= */
-function openWithdrawModal(accountId, currency, gross) {
+// Stripe/PayPal payouts don't always cover every pending payment in one go --
+// balance can be held back by their payout schedule, a rolling reserve, or
+// just partial manual payouts. So instead of sweeping every unwithdrawn
+// transaction the moment you click "withdraw" (the old behaviour), the modal
+// now lists each pending transaction individually and only tags the ones you
+// actually check as withdrawn -- the rest stay available for next time.
+function openWithdrawModal(accountId, currency) {
   const acc = accountById(accountId);
-  pendingWithdraw = { accountId, currency, gross };
+  const pending = transactions
+    .filter((t) => t.accountId === accountId && t.currency === currency && !t.withdrawalId)
+    .sort((a, b) => a.occurredAt.localeCompare(b.occurredAt) || a.createdAt.localeCompare(b.createdAt));
+  pendingWithdraw = { accountId, currency, pending, selected: new Set(pending.map((t) => t.id)), gross: 0 };
+
   $('withdrawTitle').textContent = `Withdraw — ${acc.name}`;
   $('withdrawSub').textContent = `${providerLabel(acc.provider)} · ${currency}`;
+  $('withdrawReceivedCurrencyLabel').textContent = ` (${currency})`;
+  $('withdrawReceivedAmount').value = '';
   $('commissionPct').value = 10;
-  $('withdrawPayoutCurrency').value = currency; // defaults to same currency -- no conversion unless you change this
-  updateWithdrawCalc();
+  // Both Stripe and PayPal payouts land in GBP in your UK bank regardless of
+  // what currency the charges were recorded in -- default the payout
+  // currency to match what actually shows up, rather than making you flip it
+  // every time.
+  $('withdrawPayoutCurrency').value = 'GBP';
+  renderWithdrawChecklist();
+  recalcWithdrawGross();
   $('withdrawModal').classList.add('show');
   // Refresh in the background so a conversion (if any) is priced off today's
   // rate by the time this is actually confirmed, not whatever was cached.
-  fetchLiveFxRates().then((ok) => { if (ok && pendingWithdraw) updateWithdrawCalc(); });
+  fetchLiveFxRates().then((ok) => { if (ok && pendingWithdraw) { renderWithdrawChecklist(); updateWithdrawCalc(); } });
 }
 function closeWithdrawModal() { $('withdrawModal').classList.remove('show'); pendingWithdraw = null; }
+
+function renderWithdrawChecklist() {
+  const list = $('withdrawChecklist');
+  const { pending, selected, currency } = pendingWithdraw;
+  const payoutCurrency = $('withdrawPayoutCurrency').value;
+  if (pending.length === 0) {
+    list.innerHTML = `<div class="withdraw-row"><span class="withdraw-row__meta">Nothing pending in this currency.</span></div>`;
+  } else {
+    list.innerHTML = pending.map((t) => {
+      const isRefund = t.type === 'refund';
+      const displayAmount = isRefund ? -t.amount : t.amount;
+      const fx = payoutCurrency !== currency
+        ? ` <span class="withdraw-row__fx">≈ ${fmt(convertCurrency(displayAmount, currency, payoutCurrency), payoutCurrency)}</span>`
+        : '';
+      const metaLine = `${fmtDate(t.occurredAt)}${isRefund ? ' · Refund' : ''}${t.source === 'manual' ? ' · Manual' : ' · Auto-captured'}`;
+      return `<label class="withdraw-row">
+        <input type="checkbox" data-withdraw-row="${t.id}" ${selected.has(t.id) ? 'checked' : ''}>
+        <span class="withdraw-row__meta"><span><b>${fmt(displayAmount, currency)}</b>${fx}</span><span>${metaLine}</span></span>
+      </label>`;
+    }).join('');
+  }
+  list.querySelectorAll('[data-withdraw-row]').forEach((box) => {
+    box.addEventListener('change', () => {
+      const id = box.dataset.withdrawRow;
+      if (box.checked) pendingWithdraw.selected.add(id); else pendingWithdraw.selected.delete(id);
+      recalcWithdrawGross();
+    });
+  });
+}
+
+// Sums the currently-checked rows the same way computeBalances does (refunds
+// subtract) so "selected total" always matches what the checklist shows.
+function recalcWithdrawGross() {
+  const { pending, selected } = pendingWithdraw;
+  const gross = pending.reduce((sum, t) => {
+    if (!selected.has(t.id)) return sum;
+    return t.type === 'refund' ? sum - t.amount : sum + t.amount;
+  }, 0);
+  pendingWithdraw.gross = gross;
+  $('withdrawSelectedCount').textContent = ` (${selected.size}/${pending.length})`;
+
+  const typed = parseFloat($('withdrawReceivedAmount').value);
+  const note = $('withdrawAutoSelectNote');
+  if (!isNaN(typed) && Math.abs(typed - gross) > 0.01) {
+    note.textContent = `Checked payments total ${fmt(gross, pendingWithdraw.currency)}, not the ${fmt(typed, pendingWithdraw.currency)} entered — adjust the checklist above to match what actually landed.`;
+    note.style.display = 'block';
+  } else {
+    note.style.display = 'none';
+  }
+  updateWithdrawCalc();
+}
+
+// `pending` is sorted oldest-first. `targetAmount` is what the user typed in
+// "Amount actually received" -- the payout total Stripe/PayPal actually sent,
+// which won't always equal the sum of every pending transaction. Decide which
+// transactions this payout most plausibly covers and return their ids (the
+// checklist gets re-checked to match; the user can still hand-adjust after).
+//
+// This is a real product decision, not a mechanical one -- a few honest
+// approaches, roughly in order of how much they trust "oldest-first":
+//   - Greedy oldest-first: keep adding the next-oldest pending transaction
+//     while doing so doesn't overshoot targetAmount. Matches Stripe's queue
+//     behavior reasonably well (captured charges tend to clear roughly in
+//     capture order) and is simple/predictable, but can stop short of an
+//     exact match if amounts don't line up.
+//   - Exact/closest subset match: search combinations for a subset that sums
+//     to (or nearest) targetAmount, ignoring order. Can match a specific
+//     payout exactly but is more complex and its pick may be less intuitive
+//     than "the oldest ones" when several subsets fit equally well.
+//   - Leave it manual: return [] always and let the checklist's own
+//     checkboxes be the only selection mechanism (no auto-select at all).
+// TODO: implement the auto-select strategy you want here.
+function selectTransactionsForAmount(pending, targetAmount) {
+  return [];
+}
+
+$('withdrawReceivedAmount').addEventListener('change', () => {
+  if (!pendingWithdraw) return;
+  const target = parseFloat($('withdrawReceivedAmount').value);
+  if (isNaN(target)) return;
+  const ids = selectTransactionsForAmount(pendingWithdraw.pending, target);
+  if (ids && ids.length) {
+    pendingWithdraw.selected = new Set(ids);
+    renderWithdrawChecklist();
+  }
+  recalcWithdrawGross();
+});
 
 // Converts an amount between two of the app's currencies via the shared USD
 // reference rates (same ones the FX rollup chip uses), so "withdraw as a
@@ -960,7 +1064,13 @@ function updateWithdrawCalc() {
   const commissionAmt = gross * (pct / 100);
   const net = gross - commissionAmt;
 
-  $('withdrawGross').textContent = fmt(gross, currency);
+  // Selected total leads with the payout currency -- that's the number that
+  // has to match your bank statement while you're checking boxes -- with the
+  // ledger currency alongside it since that's what the individual rows above
+  // are keyed to.
+  $('withdrawGross').textContent = payoutCurrency !== currency
+    ? `${fmt(convertCurrency(gross, currency, payoutCurrency), payoutCurrency)} (${fmt(gross, currency)})`
+    : fmt(gross, currency);
   $('withdrawCommissionAmt').textContent = fmt(commissionAmt, currency);
 
   const fxNote = $('withdrawFxNote');
@@ -978,12 +1088,17 @@ function updateWithdrawCalc() {
 }
 
 $('commissionPct').addEventListener('input', updateWithdrawCalc);
-$('withdrawPayoutCurrency').addEventListener('change', updateWithdrawCalc);
+$('withdrawPayoutCurrency').addEventListener('change', () => {
+  if (!pendingWithdraw) return;
+  renderWithdrawChecklist(); // per-row FX equivalents are keyed to this currency
+  updateWithdrawCalc();
+});
 $('withdrawCancel').addEventListener('click', closeWithdrawModal);
 $('withdrawModal').addEventListener('click', (e) => { if (e.target.id === 'withdrawModal') closeWithdrawModal(); });
 $('withdrawConfirm').addEventListener('click', async () => {
   if (!pendingWithdraw) return;
-  const { accountId, currency, gross } = pendingWithdraw;
+  const { accountId, currency, gross, pending, selected } = pendingWithdraw;
+  if (selected.size === 0) { showToast('Check at least one payment to withdraw'); return; }
   const acc = accountById(accountId);
   const pct = parseFloat($('commissionPct').value) || 0;
   const commissionAmt = gross * (pct / 100);
@@ -992,11 +1107,12 @@ $('withdrawConfirm').addEventListener('click', async () => {
   const fxRateUsed = convertCurrency(1, currency, payoutCurrency);
   const payoutNet = net * fxRateUsed;
 
-  // Covers every pending row, deposits AND refunds alike -- both get tagged
-  // with this withdrawal so neither is double-counted in future balances.
-  // transactionCount only counts deposits though, since that's what reads
-  // naturally as "N payments" in the withdrawal history.
-  const covered = transactions.filter((t) => t.accountId === accountId && t.currency === currency && !t.withdrawalId);
+  // Only the checked rows get tagged with this withdrawal -- deposits AND
+  // refunds alike, so neither is double-counted in future balances. Anything
+  // left unchecked stays pending for the next payout. transactionCount only
+  // counts deposits though, since that's what reads naturally as "N payments"
+  // in the withdrawal history.
+  const covered = pending.filter((t) => selected.has(t.id));
   const coveredIds = covered.map((t) => t.id);
   const coveredDepositCount = covered.filter((t) => t.type !== 'refund').length;
 

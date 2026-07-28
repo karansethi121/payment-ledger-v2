@@ -275,6 +275,15 @@ h1, h2, h3, p { margin: 0; }
 .checkbox-row { display: flex; align-items: center; justify-content: space-between; margin: 16px 0 7px; }
 .checkbox-row span { font-size: 13.5px; font-weight: 600; color: var(--ink-soft); }
 .checkbox-row input[type="checkbox"] { width: 19px; height: 19px; accent-color: var(--pine); cursor: pointer; }
+.withdraw-checklist { max-height: 220px; overflow-y: auto; border: 1px solid var(--rule); border-radius: var(--radius-sm); background: var(--paper-sunken); margin-bottom: 4px; }
+.withdraw-row { display: flex; align-items: center; gap: 10px; padding: 9px 12px; border-bottom: 1px solid var(--rule); }
+.withdraw-row:last-child { border-bottom: none; }
+.withdraw-row input[type="checkbox"] { width: 17px; height: 17px; accent-color: var(--pine); cursor: pointer; flex-shrink: 0; }
+.withdraw-row__meta { flex: 1; display: flex; flex-direction: column; font-size: 12px; color: var(--ink-muted); cursor: pointer; }
+.withdraw-row__meta b { font-size: 13px; color: var(--ink); font-weight: 600; }
+.withdraw-row__amt { font-family: var(--font-mono); font-size: 13px; font-weight: 700; }
+.withdraw-row__amt.refund { color: var(--rust); }
+.withdraw-row__fx { font-family: var(--font-mono); font-size: 11px; font-weight: 600; color: var(--ink-muted); }
 .modal-row { display: flex; justify-content: space-between; align-items: center; padding: 11px 0; border-bottom: 1px solid var(--rule); }
 .modal-row:last-of-type { border-bottom: none; }
 .modal-row .label { font-size: 13.5px; color: var(--ink-muted); }

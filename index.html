@@ -146,7 +146,16 @@
     <h3 id="withdrawTitle">Withdraw</h3>
     <p class="modal-sub" id="withdrawSub"></p>
 
-    <div class="modal-row"><span class="label">Available balance</span><span class="value" id="withdrawGross"></span></div>
+    <p class="modal-note">Stripe/PayPal payouts often don't cover everything at once. Enter what actually landed and pick which payments it covers — anything left unchecked stays available for next time.</p>
+
+    <div class="field-label">Amount actually received<span id="withdrawReceivedCurrencyLabel" style="text-transform:none;letter-spacing:normal;"></span></div>
+    <input class="text-input" id="withdrawReceivedAmount" type="number" min="0" step="0.01" inputmode="decimal">
+    <p class="modal-note" id="withdrawAutoSelectNote" style="display:none;"></p>
+
+    <div class="field-label">Covers these payments<span id="withdrawSelectedCount"></span></div>
+    <div class="withdraw-checklist" id="withdrawChecklist"></div>
+
+    <div class="modal-row"><span class="label">Selected total</span><span class="value" id="withdrawGross"></span></div>
     <div class="modal-row">
       <span class="label">Commission</span>
       <span class="value"><input class="commission-input" id="commissionPct" type="number" value="10" min="0" max="100" step="0.1">%</span>
@@ -165,7 +174,7 @@
     <p class="modal-note" id="withdrawFxNote" style="display:none;"></p>
     <div class="modal-row net"><span class="label">You withdraw</span><span class="value" id="withdrawNet"></span></div>
 
-    <p class="modal-note">Confirming marks every currently-available payment in this account/currency as withdrawn and records this as a withdrawal. Nothing is deleted — full history stays visible below, just locked from further edits.</p>
+    <p class="modal-note">Confirming marks only the checked payments as withdrawn and records this as a withdrawal. Nothing is deleted — full history stays visible below, just locked from further edits.</p>
 
     <div class="modal-actions">
       <button class="modal-cancel" id="withdrawCancel">Cancel</button>
