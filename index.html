@@ -215,7 +215,7 @@
 <div class="modal-overlay" id="fxModal">
   <div class="modal-sheet">
     <h3>FX rates</h3>
-    <p class="modal-sub">Manual rates for one rollup total across currencies. Not live &mdash; update these yourself as real rates move.</p>
+    <p class="modal-sub">Live exchange rates for the combined total across currencies, sourced from the European Central Bank and refreshed automatically.</p>
 
     <p class="field-label">Home currency</p>
     <select class="select-input" id="fxHomeCurrency" style="width:100%;">
@@ -224,11 +224,15 @@
       <option value="AUD">AUD</option>
     </select>
 
+    <div class="fx-status">
+      <span id="fxUpdatedAt">Live rates</span>
+      <button class="rate-link" id="fxRefreshBtn" type="button">↻ Refresh</button>
+    </div>
     <div id="fxRateRows"></div>
 
     <div class="modal-actions">
       <button class="modal-cancel" id="fxCancel">Cancel</button>
-      <button class="modal-confirm" id="fxSave">Save rates</button>
+      <button class="modal-confirm" id="fxSave">Done</button>
     </div>
   </div>
 </div>

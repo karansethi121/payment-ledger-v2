@@ -26,6 +26,16 @@
   --ochre:     #8A6416;
   --ochre-soft:#F1E7D3;
 
+  /* Provider identity is the one place besides money state that earns color --
+     which processor an account is on is glance-critical (it's how auto-capture
+     routes), so these get the same "confident, not neon" treatment as money. */
+  --stripe:      #5B4FE0;
+  --stripe-soft: #EFEDFB;
+  --stripe-line: #CCC5F5;
+  --paypal:      #1770B8;
+  --paypal-soft: #E7F1FA;
+  --paypal-line: #B7D8F0;
+
   --radius-lg: 20px;
   --radius-md: 14px;
   --radius-sm: 10px;
@@ -128,9 +138,17 @@ h1, h2, h3, p { margin: 0; }
 }
 .account.is-archived { opacity: 0.6; }
 .account__head { display: flex; align-items: flex-start; justify-content: space-between; gap: 10px; }
+.account__name-row { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
 .account__title h3 { font-size: 16px; font-weight: 700; color: var(--ink); }
+.provider-badge {
+  font-family: var(--font-mono); font-size: 10px; font-weight: 700; letter-spacing: .04em;
+  text-transform: uppercase; padding: 3px 8px; border-radius: 20px; border: 1px solid transparent; line-height: 1.3;
+}
+.provider-badge--stripe { background: var(--stripe-soft); color: var(--stripe); border-color: var(--stripe-line); }
+.provider-badge--paypal { background: var(--paypal-soft); color: var(--paypal); border-color: var(--paypal-line); }
+.provider-badge--invoice, .provider-badge--other { background: var(--paper-sunken); color: var(--ink-muted); border-color: var(--rule); }
 .account__meta {
-  font-family: var(--font-mono); font-size: 11px; color: var(--ink-muted); margin-top: 3px;
+  font-family: var(--font-mono); font-size: 11px; color: var(--ink-muted); margin-top: 5px;
   letter-spacing: .02em;
 }
 .account__meta .is-warn { color: var(--ochre); }
@@ -160,6 +178,8 @@ h1, h2, h3, p { margin: 0; }
 }
 .copy-link-btn:hover { border-color: var(--ink-faint); color: var(--ink); }
 .copy-link-btn.copied { background: var(--pine-soft); border-color: var(--pine); color: var(--pine); }
+.copy-link-btn--static { cursor: default; color: var(--ink-muted); }
+.copy-link-btn--static:hover { border-color: var(--rule); color: var(--ink-muted); }
 
 .icon-btn {
   border: 1px solid var(--rule); background: transparent; color: var(--ink-muted); border-radius: var(--radius-sm);
@@ -263,10 +283,16 @@ h1, h2, h3, p { margin: 0; }
 .modal-note { font-size: 12px; color: var(--ink-muted); margin-top: 14px; line-height: 1.55; background: var(--paper-sunken); padding: 11px 13px; border-radius: var(--radius-sm); border-left: 2px solid var(--pine); }
 
 /* ================= FX rate rows ================= */
+.fx-status { display: flex; align-items: center; justify-content: space-between; margin: 2px 0 4px; font-family: var(--font-mono); font-size: 11px; color: var(--ink-muted); }
 .fx-rate-row { display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 10px 0; border-bottom: 1px solid var(--rule); }
 .fx-rate-row:last-child { border-bottom: none; }
 .fx-rate-row .lbl { font-size: 13.5px; color: var(--ink-soft); font-family: var(--font-mono); }
-.fx-rate-row input { width: 90px; font-family: var(--font-mono); font-size: 13.5px; font-weight: 700; text-align: right; border: 1px solid var(--rule); border-radius: 6px; padding: 6px 9px; background: var(--paper-sunken); color: var(--ink); outline: none; }
+.fx-rate-value { font-family: var(--font-mono); font-size: 13.5px; font-weight: 700; color: var(--ink); }
+.rate-link {
+  font-family: var(--font-display); font-size: 11.5px; font-weight: 600; color: var(--pine);
+  text-decoration: none; background: none; border: none; padding: 0; cursor: pointer;
+}
+.rate-link:hover { text-decoration: underline; }
 
 /* ================= Toast / sync banner / FAB ================= */
 .toast {
@@ -330,7 +356,7 @@ h1, h2, h3, p { margin: 0; }
   #addPaymentBtn { display: none; }
 
   /* iOS Safari zooms on focus for any input under 16px -- this was firing on every field. */
-  .text-input, .date-input, .select-input, .search-input, .commission-input, .fx-rate-row input {
+  .text-input, .date-input, .select-input, .search-input, .commission-input {
     font-size: 16px !important;
   }
 

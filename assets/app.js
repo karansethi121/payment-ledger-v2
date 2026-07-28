@@ -22,11 +22,15 @@ let feedDateTo = '';
 
 const STALE_DAYS_THRESHOLD = 14;
 
-// Manual FX reference: "1 unit of CUR = ? USD". Not live -- edited by hand in the
-// FX Rates modal. The rollup total converts through USD regardless of which
-// currency is chosen as the display "home currency".
+// Live FX reference: "1 unit of CUR = ? USD", fetched from Frankfurter (ECB
+// reference rates) and cached in localStorage so the app still has *a* rate
+// to work with offline -- just possibly a stale one, which fxRatesUpdatedAt
+// makes visible rather than silently hiding. The rollup total converts
+// through USD regardless of which currency is chosen as the display "home
+// currency".
 let fxToUSD = { USD: 1, GBP: 1.27, AUD: 0.66 };
 let fxHomeCurrency = 'USD';
+let fxRatesUpdatedAt = null;
 
 const LS_ACCOUNTS = 'ledgerv2:accounts';
 const LS_TRANSACTIONS = 'ledgerv2:transactions';
@@ -60,6 +64,29 @@ function escapeHtml(str) {
 }
 function accountById(id) { return accounts.find((a) => a.id === id); }
 function providerLabel(p) { return { stripe: 'Stripe', paypal: 'PayPal', invoice: 'Invoice', other: 'Other' }[p] || p; }
+// Frankfurter serves ECB reference rates, free, no API key, CORS-enabled --
+// good fit for a static frontend with no backend of its own to proxy through.
+// Rates update once per ECB business day; there's no need to poll more often
+// than "once per app load, plus whenever the user opens something FX-related".
+async function fetchLiveFxRates() {
+  const targets = Object.keys(fxToUSD).filter((c) => c !== 'USD');
+  if (targets.length === 0) return false;
+  try {
+    const res = await fetch(`https://api.frankfurter.dev/v1/latest?from=USD&to=${targets.join(',')}`);
+    if (!res.ok) throw new Error(`FX API responded ${res.status}`);
+    const data = await res.json();
+    targets.forEach((cur) => {
+      const rate = data.rates && data.rates[cur];
+      if (rate) fxToUSD[cur] = 1 / rate; // API gives "1 USD = X CUR"; app stores "1 CUR = ? USD"
+    });
+    fxRatesUpdatedAt = data.date || todayISO();
+    saveFxSettings();
+    return true;
+  } catch (e) {
+    console.warn('Live FX rate fetch failed, keeping last-known rates:', e);
+    return false;
+  }
+}
 
 function showToast(msg) {
   // Built via textContent/DOM nodes, not innerHTML -- msg often embeds
@@ -393,7 +420,7 @@ function renderHero() {
     <div class="hero__row"><span>${cur}</span><span class="${val < 0 ? 'is-negative' : ''}">${fmt(val, cur)}</span></div>
   `).join('');
   wrap.innerHTML = `<div class="hero">
-    <button class="hero__label hero__label--link" id="fxRollupChip" title="Manual FX rates -- click to edit">≈ ${fxHomeCurrency} Available &middot; edit rates ⚙</button>
+    <button class="hero__label hero__label--link" id="fxRollupChip" title="Live FX rates -- click for details">≈ ${fxHomeCurrency} Available &middot; live rates ⚙</button>
     <div class="hero__figure ${rollup < 0 ? 'is-negative' : ''}">${fmt(rollup, fxHomeCurrency)}</div>
     <div class="hero__breakdown">${rows}</div>
   </div>`;
@@ -415,17 +442,19 @@ function loadFxSettings() {
       const parsed = JSON.parse(val);
       if (parsed.rates) fxToUSD = { ...fxToUSD, ...parsed.rates };
       if (parsed.home) fxHomeCurrency = parsed.home;
+      if (parsed.updatedAt) fxRatesUpdatedAt = parsed.updatedAt;
     } catch (e) { /* keep defaults */ }
   }
 }
 function saveFxSettings() {
-  localStorage.setItem(LS_FXRATES, JSON.stringify({ rates: fxToUSD, home: fxHomeCurrency }));
+  localStorage.setItem(LS_FXRATES, JSON.stringify({ rates: fxToUSD, home: fxHomeCurrency, updatedAt: fxRatesUpdatedAt }));
 }
 
 function openFxModal() {
   $('fxHomeCurrency').value = fxHomeCurrency;
   renderFxRateRows();
   $('fxModal').classList.add('show');
+  refreshFxRates(); // always show the freshest rate the moment this is opened
 }
 function closeFxModal() { $('fxModal').classList.remove('show'); }
 function renderFxRateRows() {
@@ -434,24 +463,30 @@ function renderFxRateRows() {
   container.innerHTML = currencies.map((cur) => `
     <div class="fx-rate-row">
       <span class="lbl">1 ${cur} =</span>
-      <input type="number" step="0.0001" min="0" data-fx-currency="${cur}" value="${fxToUSD[cur]}"> USD
+      <span class="fx-rate-value">${fxToUSD[cur].toFixed(4)} USD</span>
     </div>
   `).join('');
+  const status = $('fxUpdatedAt');
+  if (status) status.textContent = fxRatesUpdatedAt ? `Live · as of ${fxRatesUpdatedAt}` : 'Live rates';
+}
+async function refreshFxRates() {
+  const status = $('fxUpdatedAt');
+  if (status) status.textContent = 'Refreshing…';
+  const ok = await fetchLiveFxRates();
+  if ($('fxModal').classList.contains('show')) renderFxRateRows();
+  if (!ok && status) status.textContent = fxRatesUpdatedAt ? `Live · as of ${fxRatesUpdatedAt} (refresh failed — offline?)` : "Couldn't load live rates — offline?";
+  renderAll(); // the hero rollup total also depends on these rates
 }
 $('fxRatesBtn').addEventListener('click', openFxModal);
+$('fxRefreshBtn').addEventListener('click', refreshFxRates);
 $('fxCancel').addEventListener('click', closeFxModal);
 $('fxModal').addEventListener('click', (e) => { if (e.target.id === 'fxModal') closeFxModal(); });
 $('fxSave').addEventListener('click', () => {
-  document.querySelectorAll('[data-fx-currency]').forEach((input) => {
-    const cur = input.dataset.fxCurrency;
-    const val = parseFloat(input.value);
-    if (val > 0) fxToUSD[cur] = val;
-  });
   fxHomeCurrency = $('fxHomeCurrency').value;
   saveFxSettings();
   closeFxModal();
   renderAll();
-  showToast('FX rates updated');
+  showToast('Home currency updated');
 });
 
 /* ================= Render: account grid ================= */
@@ -482,25 +517,37 @@ function renderAccountGrid() {
         }).join('')
       : `<p style="color:var(--ink-muted);font-size:12.5px;margin:0;padding-top:14px;">No payments yet.</p>`;
 
-    // Provider is plain text, not a colored pill -- color is reserved for money
-    // state (positive/negative/warning), not branding or bookkeeping facts.
-    // Same reasoning drops the redundant "Invoice" badge when the provider
-    // field already says that.
+    // Provider now gets a colored badge next to the name, not a small muted
+    // line underneath -- which processor an account is on is glance-critical
+    // (it's how auto-capture is wired), so it earns the one place in this UI
+    // where color marks identity rather than money state. Bookkeeping facts
+    // (archived, stale) stay muted text in the line below.
+    //
+    // No payment link isn't a warning -- plenty of accounts are deliberately
+    // invoiced by hand instead of via a shareable link. So instead of a "No
+    // link" flag, the action slot that would hold the copy-link button just
+    // says "Invoice" there instead, same spot, same weight.
     const flags = [];
     if (acc.archived) flags.push('Archived');
-    if (!acc.paymentLink && acc.provider !== 'invoice') flags.push('No link');
     const staleFlag = staleWarningTag(acc);
     if (staleFlag) flags.push(staleFlag);
     const metaFlags = flags.map((f) => ` &middot; ${f}`).join('');
 
+    const linkAction = acc.paymentLink
+      ? `<button class="copy-link-btn" data-copy-account="${acc.id}" title="Copy payment link">🔗</button>`
+      : `<span class="copy-link-btn copy-link-btn--static" title="No payment link -- invoiced manually">Invoice</span>`;
+
     return `<article class="account ${acc.archived ? 'is-archived' : ''}">
       <div class="account__head">
         <div class="account__title">
-          <h3>${escapeHtml(acc.name)}</h3>
-          <div class="account__meta">${providerLabel(acc.provider)}${metaFlags}</div>
+          <div class="account__name-row">
+            <h3>${escapeHtml(acc.name)}</h3>
+            <span class="provider-badge provider-badge--${acc.provider}">${providerLabel(acc.provider)}</span>
+          </div>
+          ${metaFlags ? `<div class="account__meta">${metaFlags.replace(/^ &middot; /, '')}</div>` : ''}
         </div>
         <div class="account__actions">
-          ${acc.paymentLink ? `<button class="copy-link-btn" data-copy-account="${acc.id}" title="Copy payment link">🔗</button>` : ''}
+          ${linkAction}
           <button class="icon-btn" data-edit-account="${acc.id}" title="Edit account">✎</button>
         </div>
       </div>
@@ -756,6 +803,9 @@ function openWithdrawModal(accountId, currency, gross) {
   $('withdrawPayoutCurrency').value = currency; // defaults to same currency -- no conversion unless you change this
   updateWithdrawCalc();
   $('withdrawModal').classList.add('show');
+  // Refresh in the background so a conversion (if any) is priced off today's
+  // rate by the time this is actually confirmed, not whatever was cached.
+  fetchLiveFxRates().then((ok) => { if (ok && pendingWithdraw) updateWithdrawCalc(); });
 }
 function closeWithdrawModal() { $('withdrawModal').classList.remove('show'); pendingWithdraw = null; }
 
@@ -784,7 +834,8 @@ function updateWithdrawCalc() {
   if (payoutCurrency !== currency) {
     const rate = convertCurrency(1, currency, payoutCurrency);
     const payoutNet = net * rate;
-    fxNote.textContent = `Converting ${fmt(net, currency)} → ${payoutCurrency} at 1 ${currency} = ${rate.toFixed(4)} ${payoutCurrency} (from your FX Rates settings).`;
+    const asOf = fxRatesUpdatedAt ? ` as of ${fxRatesUpdatedAt}` : '';
+    fxNote.textContent = `Converting ${fmt(net, currency)} → ${payoutCurrency} at 1 ${currency} = ${rate.toFixed(4)} ${payoutCurrency} (live rate${asOf}).`;
     fxNote.style.display = 'block';
     $('withdrawNet').textContent = fmt(payoutNet, payoutCurrency);
   } else {
@@ -998,6 +1049,10 @@ function seedDemoData() {
 
   loadOutbox();
   loadFxSettings();
+  // Non-blocking -- render with cached/last-known rates first, then swap in
+  // live ones whenever they land so a slow or offline fetch never delays
+  // first paint.
+  fetchLiveFxRates().then((ok) => { if (ok) renderAll(); });
   if (!supabaseClient) seedDemoData();
 
   if ('serviceWorker' in navigator) {
