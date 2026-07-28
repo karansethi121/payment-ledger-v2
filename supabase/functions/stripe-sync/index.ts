@@ -90,8 +90,8 @@ Deno.serve(async (req) => {
   try {
     const balance = await syncBalance(stripe, accountId);
     const feesBackfilled = await syncFees(stripe, accountId);
-    const { payoutsProcessed, newWithdrawals } = await syncPayouts(stripe, accountId);
-    return json({ balance, feesBackfilled, payoutsProcessed, newWithdrawals });
+    const { payoutsProcessed, newWithdrawals, payoutsSkipped, skippedPayouts } = await syncPayouts(stripe, accountId);
+    return json({ balance, feesBackfilled, payoutsProcessed, newWithdrawals, payoutsSkipped, skippedPayouts });
   } catch (err) {
     console.error(`stripe-sync failed for ${accountId}:`, (err as Error).message);
     return json({ error: (err as Error).message }, 500);
@@ -131,18 +131,43 @@ async function syncFees(stripe: Stripe, accountId: string) {
 
   let count = 0;
   for (const t of pending ?? []) {
-    if (!t.external_ref?.startsWith("pi_")) continue; // only PaymentIntent ids are fee-lookupable this way
     try {
-      const pi = await stripe.paymentIntents.retrieve(t.external_ref, { expand: ["latest_charge.balance_transaction"] });
-      const charge = pi.latest_charge as Stripe.Charge | null;
-      const bt = charge?.balance_transaction as Stripe.BalanceTransaction | null;
+      let bt: Stripe.BalanceTransaction | null = null;
+      if (t.external_ref?.startsWith("pi_")) {
+        const pi = await stripe.paymentIntents.retrieve(t.external_ref, { expand: ["latest_charge.balance_transaction"] });
+        const charge = pi.latest_charge as Stripe.Charge | null;
+        bt = charge?.balance_transaction as Stripe.BalanceTransaction | null;
+      } else if (t.external_ref?.startsWith("cs_")) {
+        // stripe-webhook falls back to the Checkout Session id when an event
+        // arrives with no payment_intent attached -- in practice this is the
+        // common case, not an edge case, so it needs its own lookup path
+        // rather than being silently skipped.
+        const session = await stripe.checkout.sessions.retrieve(t.external_ref, {
+          expand: ["payment_intent.latest_charge.balance_transaction"],
+        });
+        const pi = session.payment_intent as Stripe.PaymentIntent | null;
+        const charge = pi?.latest_charge as Stripe.Charge | null;
+        bt = charge?.balance_transaction as Stripe.BalanceTransaction | null;
+      } else {
+        continue; // no known way to look up a balance transaction from this ref
+      }
       if (!bt) continue;
+      // bt.fee/bt.net are in bt.currency -- the account's settlement
+      // currency (e.g. GBP), NOT necessarily t's own `currency` (the
+      // original charge currency, e.g. USD). A $1.00 USD charge nets out to
+      // a GBP amount here, not a dollar one -- storing the currency alongside
+      // is what stops that from being silently mislabeled.
       const { error: updateError } = await supabase.from("transactions").update({
         provider_fee: bt.fee / 100,
         provider_net: bt.net / 100,
+        provider_currency: bt.currency.toUpperCase(),
       }).eq("id", t.id);
       if (!updateError) count++;
     } catch (err) {
+      // Requires "Payment Intents Read" and "Checkout Sessions Read" on the
+      // restricted key in addition to Balance/Balance Transactions/Payouts --
+      // logged rather than surfaced per-row since a permissions gap affects
+      // every row identically and the toast already reports feesBackfilled=0.
       console.warn(`Fee lookup failed for ${t.id} (${t.external_ref}):`, (err as Error).message);
     }
   }
@@ -153,13 +178,39 @@ async function syncPayouts(stripe: Stripe, accountId: string) {
   const payouts = await stripe.payouts.list({ limit: 10 });
   let payoutsProcessed = 0;
   let newWithdrawals = 0;
+  let payoutsSkipped = 0;
+  // Non-sensitive summary of payouts we couldn't auto-match (manual payout
+  // schedule) -- lets the frontend show exactly what Stripe reports (amount,
+  // status, when) so a manual reconciliation in the withdraw modal can match
+  // it precisely instead of guessing from "some payout happened."
+  const skippedPayouts: { id: string; amount: number; currency: string; status: string; arrivalDate: string }[] = [];
 
   for (const payout of payouts.data) {
     payoutsProcessed++;
     const { data: existing } = await supabase.from("withdrawals").select("id").eq("provider_payout_id", payout.id).maybeSingle();
     if (existing) continue;
 
-    const btxns = await stripe.balanceTransactions.list({ payout: payout.id, type: "charge", limit: 100, expand: ["data.source"] });
+    let btxns: Stripe.ApiList<Stripe.BalanceTransaction>;
+    try {
+      btxns = await stripe.balanceTransactions.list({ payout: payout.id, type: "charge", limit: 100, expand: ["data.source"] });
+    } catch (err) {
+      // Stripe only supports filtering balance transactions by payout for
+      // AUTOMATIC payouts (its own rolling payout schedule) -- accounts that
+      // pay out on demand instead ("manual" schedule) hit this every time.
+      // There's no equivalent lookup for a manual payout, so we can't
+      // auto-match which charges it covered -- skip it rather than failing
+      // the whole sync, and leave it to the manual withdraw-modal checklist.
+      console.warn(`Skipping payout ${payout.id} (can't list its balance transactions):`, (err as Error).message);
+      payoutsSkipped++;
+      skippedPayouts.push({
+        id: payout.id,
+        amount: payout.amount / 100,
+        currency: payout.currency.toUpperCase(),
+        status: payout.status,
+        arrivalDate: new Date(payout.arrival_date * 1000).toISOString().slice(0, 10),
+      });
+      continue;
+    }
     const paymentIntentIds = btxns.data
       .map((bt) => (bt.source as Stripe.Charge | null)?.payment_intent)
       .map((pi) => (typeof pi === "string" ? pi : pi?.id))
@@ -211,5 +262,5 @@ async function syncPayouts(stripe: Stripe, accountId: string) {
     }
   }
 
-  return { payoutsProcessed, newWithdrawals };
+  return { payoutsProcessed, newWithdrawals, payoutsSkipped, skippedPayouts };
 }

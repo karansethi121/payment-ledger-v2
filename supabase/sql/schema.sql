@@ -82,9 +82,13 @@ create table transactions (
   -- Backfilled by stripe-sync (later paypal-sync) from the provider's own
   -- Balance Transactions API -- what the processor actually took and what was
   -- actually left over, as opposed to `amount` which is the full charge. Null
-  -- until synced at least once.
+  -- until synced at least once. fee/net are in provider_currency (the
+  -- account's settlement currency, e.g. GBP for a UK Stripe account), which
+  -- is not necessarily the same as `currency` (the original charge currency)
+  -- above -- never assume they match.
   provider_fee numeric(14,2),
-  provider_net numeric(14,2)
+  provider_net numeric(14,2),
+  provider_currency text
 );
 
 create index transactions_account_idx on transactions(account_id);

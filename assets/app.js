@@ -277,9 +277,13 @@ const storageAdapter = {
           relatedTransactionId: t.related_transaction_id, withdrawalId: t.withdrawal_id,
           occurredAt: t.occurred_at, createdAt: t.created_at,
           // Backfilled by stripe-sync from Stripe's own Balance Transactions
-          // API -- null until synced at least once.
+          // API -- null until synced at least once. fee/net are in
+          // providerCurrency (the account's settlement currency), which is
+          // NOT necessarily the same as `currency` above (the original
+          // charge currency) -- never format them using `currency`.
           providerFee: t.provider_fee != null ? Number(t.provider_fee) : null,
-          providerNet: t.provider_net != null ? Number(t.provider_net) : null
+          providerNet: t.provider_net != null ? Number(t.provider_net) : null,
+          providerCurrency: t.provider_currency
         }));
       } catch (e) {
         console.warn('Cloud read for transactions failed, using local cache:', e);
@@ -693,6 +697,15 @@ async function syncStripeAccount(accountId, btn) {
     const parts = [];
     if (data?.feesBackfilled) parts.push(`${data.feesBackfilled} fee${data.feesBackfilled === 1 ? '' : 's'} backfilled`);
     if (data?.newWithdrawals) parts.push(`${data.newWithdrawals} payout${data.newWithdrawals === 1 ? '' : 's'} reconciled`);
+    // Stripe won't let this function auto-match which charges a manually
+    // triggered payout covered (only automatic-schedule payouts support that
+    // lookup) -- surfaced with the real amount/status Stripe reports so it's
+    // actionable, not just a count. The withdraw modal's checklist is still
+    // how these get recorded.
+    if (data?.skippedPayouts?.length) {
+      const detail = data.skippedPayouts.map((p) => `${fmt(p.amount, p.currency)} (${p.status}, ${p.arrivalDate})`).join('; ');
+      parts.push(`needs manual withdrawal: ${detail}`);
+    }
     showToast(parts.length ? `Synced — ${parts.join(', ')}` : 'Synced — no changes');
   } catch (e) {
     showToast(`Stripe sync failed: ${e.message || e}`);
@@ -1054,8 +1067,10 @@ function renderWithdrawChecklist() {
       // provider_net (from stripe-sync) is what actually became available
       // after Stripe's own cut -- worth surfacing right on the row since
       // that's the number that has to reconcile against your Stripe balance,
-      // not the full charge amount.
-      const feeLine = !isRefund && t.providerNet != null ? ` · net ${fmt(t.providerNet, currency)} after fees` : '';
+      // not the full charge amount. It's in providerCurrency (the account's
+      // settlement currency), NOT `currency` -- formatting it with `currency`
+      // would silently mislabel the amount (e.g. GBP shown as if it were USD).
+      const feeLine = !isRefund && t.providerNet != null ? ` · net ${fmt(t.providerNet, t.providerCurrency || currency)} after fees` : '';
       const metaLine = `${fmtDate(t.occurredAt)}${isRefund ? ' · Refund' : ''}${t.source === 'manual' ? ' · Manual' : ' · Auto-captured'}${feeLine}`;
       return `<label class="withdraw-row">
         <input type="checkbox" data-withdraw-row="${t.id}" ${selected.has(t.id) ? 'checked' : ''}>
@@ -1086,14 +1101,19 @@ function recalcWithdrawGross() {
   // Only meaningful once stripe-sync has backfilled provider_net on at least
   // one selected row -- null (not 0) for an unsynced account means "unknown,"
   // not "no fee," so the row stays hidden rather than showing a misleading 0.
-  const selectedRows = pending.filter((t) => selected.has(t.id));
+  // provider_net is in providerCurrency (the account's settlement currency,
+  // e.g. GBP), NOT `currency` (the original USD charge amount) -- so this
+  // total can only include rows that share the same providerCurrency, and
+  // unsynced/refund rows are left out of the sum entirely rather than
+  // guessed at, to avoid quietly mixing currencies into one number.
+  const selectedDeposits = pending.filter((t) => selected.has(t.id) && t.type !== 'refund');
+  const syncedDeposits = selectedDeposits.filter((t) => t.providerNet != null);
   const feeRow = $('withdrawFeeNetRow');
-  if (selectedRows.some((t) => t.providerNet != null)) {
-    const netTotal = selectedRows.reduce((sum, t) => {
-      const net = t.providerNet ?? t.amount; // rows not yet synced fall back to full amount
-      return t.type === 'refund' ? sum - t.amount : sum + net;
-    }, 0);
-    $('withdrawFeeNetValue').textContent = fmt(netTotal, pendingWithdraw.currency);
+  if (syncedDeposits.length > 0) {
+    const providerCurrency = syncedDeposits[0].providerCurrency || pendingWithdraw.currency;
+    const netTotal = syncedDeposits.reduce((sum, t) => sum + t.providerNet, 0);
+    const partial = syncedDeposits.length < selectedDeposits.length ? ` (${syncedDeposits.length}/${selectedDeposits.length} synced)` : '';
+    $('withdrawFeeNetValue').textContent = fmt(netTotal, providerCurrency) + partial;
     feeRow.style.display = 'flex';
   } else {
     feeRow.style.display = 'none';
