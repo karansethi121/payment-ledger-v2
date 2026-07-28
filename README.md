@@ -60,6 +60,14 @@ same purpose (accounts, payment links, a ledger, cashing out) but a different co
   fee/net, reusing the OAuth credentials `paypal-webhook` already has. Deliberately skips
   payout reconciliation (see its own section below for why); those still go through the
   manual withdraw-modal checklist.
+- **Square**: third provider alongside Stripe/PayPal -- `square-webhook` (auto-capture) and
+  `square-sync` (fee/payout sync), added when United Goods UK started using Square as a
+  backup processor. Square has no "current balance" endpoint at all (unlike Stripe/PayPal),
+  but its Payouts API returns exactly which payments a payout covered for both full and
+  partial payouts -- unlike Stripe, which only supports that for its automatic schedule --
+  so Square payout reconciliation is expected to actually work rather than needing the
+  manual-payout fallback. See its own sections below. Not yet exercised against a real
+  Square payment -- treat as wired-but-unverified until one happens.
 
 Since Karan Sethi and United Goods UK are **separate Stripe accounts** (not two Payment
 Links under one account), the Stripe function doesn't match by Payment Link ID -- each
@@ -131,6 +139,60 @@ captures were included in this withdrawal to bank" -- a PayPal withdrawal sweeps
 available balance rather than transferring specific line items. Withdrawals from PayPal
 accounts go through the manual withdraw-modal checklist, same as Stripe's manual-schedule
 payouts already do.
+
+### Setting up `square-webhook` (auto-capture)
+
+Each Square account gets its own "application" in the Developer Dashboard, with its own
+webhook subscription and signature key -- same account-matching approach as
+`stripe-webhook`/`paypal-webhook` (try each configured account's key against the incoming
+signature; whichever one verifies identifies the account):
+
+```bash
+supabase secrets set SQUARE_ACCOUNTS_JSON='[{"accountId":"ugu-square","signatureKey":"...","notificationUrl":"https://<project-ref>.supabase.co/functions/v1/square-webhook"}]'
+supabase functions deploy square-webhook --no-verify-jwt
+```
+
+`notificationUrl` must be the **exact** URL entered in the Square Dashboard's webhook
+subscription (Square signs against it, so a mismatch fails verification for every event,
+not just some). In each Square account's Developer Dashboard -> your app -> Webhooks, add
+an endpoint pointing at that same URL, subscribed to `payment.updated` and `refund.updated`
+-- not `payment.created`/`refund.created`, since those fire before a payment/refund is
+actually confirmed; the handler only records a deposit/refund once `status` reaches
+`COMPLETED`, ignoring every other delivery for that id.
+
+Verification uses the official `square` npm package's `WebhooksHelper.verifySignature`
+rather than a hand-rolled HMAC -- Square's docs don't fully specify the exact
+string-concatenation format for a manual implementation, so the SDK helper is the safer
+choice (same reasoning as using Stripe's SDK for its signature verification instead of
+reimplementing it).
+
+### Setting up `square-sync` (real fee/payout data)
+
+Same deploy posture as `stripe-sync`/`paypal-sync` (JWT verification, CORS locked to the
+site origin, one-sync-per-minute cooldown):
+
+```bash
+supabase secrets set SQUARE_API_KEYS_JSON='[{"accountId":"ugu-square","accessToken":"EAAA..."}]'
+supabase functions deploy square-sync
+```
+
+Needs a **production Access Token** per account (Developer Dashboard -> your app ->
+Credentials) -- a genuinely different credential from the webhook signature key above, same
+separation-of-privilege reasoning as `stripe-sync` needing its own key distinct from
+`stripe-webhook`'s signing secret. Square has no OAuth client-credentials grant the way
+Stripe/PayPal do for this kind of single-account integration; the access token is issued
+directly.
+
+**Does not write a real balance to the account card** -- Square has no "current balance"
+endpoint at all, unlike Stripe/PayPal. Money just settles into payouts on Square's own
+schedule with no persistent balance to query, so the ledger's own computed sum is the only
+balance number that exists for a Square account. Fee backfill and payout reconciliation
+both still apply, and per Square's docs, `ListPayoutEntries` returns the exact payment ids
+in a payout for **both** full-balance and partial payouts -- unlike Stripe's equivalent,
+which only works for its automatic payout schedule -- so Square payout auto-reconciliation
+is expected to actually succeed rather than needing the manual-payout fallback `stripe-sync`
+has. Scoped to the account's default location; a multi-location Square account would need
+this extended to loop over locations.
 
 ## Setting this up from scratch (a new deployment)
 
@@ -217,6 +279,8 @@ supabase/sql/schema.sql             Database schema for a new Supabase project
 supabase/sql/migrations/            Incremental changes to apply to an already-deployed DB
 supabase/functions/stripe-webhook/  Auto-capture from Stripe
 supabase/functions/paypal-webhook/  Auto-capture from PayPal
+supabase/functions/square-webhook/  Auto-capture from Square
 supabase/functions/stripe-sync/     On-demand real balance/fee/payout sync from Stripe's API
 supabase/functions/paypal-sync/     On-demand real balance/fee sync from PayPal's API
+supabase/functions/square-sync/     On-demand real fee/payout sync from Square's API
 ```

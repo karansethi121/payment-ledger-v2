@@ -73,7 +73,12 @@ function escapeHtml(str) {
   return div.innerHTML;
 }
 function accountById(id) { return accounts.find((a) => a.id === id); }
-function providerLabel(p) { return { stripe: 'Stripe', paypal: 'PayPal', invoice: 'Invoice', other: 'Other' }[p] || p; }
+function providerLabel(p) { return { stripe: 'Stripe', paypal: 'PayPal', square: 'Square', invoice: 'Invoice', other: 'Other' }[p] || p; }
+// Providers with a webhook (auto-capture) and *-sync (fee/payout) Edge
+// Function -- everywhere this app treats a provider specially (webhook
+// health warnings, the sync button, "missed webhook?" flags) keys off this
+// one list instead of repeating the same three-way OR at each call site.
+const AUTO_CAPTURE_PROVIDERS = ['stripe', 'paypal', 'square'];
 // Frankfurter serves ECB reference rates, free, no API key, CORS-enabled --
 // good fit for a static frontend with no backend of its own to proxy through.
 // Rates update once per ECB business day; there's no need to poll more often
@@ -426,7 +431,7 @@ function staleWarningTag(acc) {
 // sales" is.
 function webhookHealthTag(acc) {
   if (acc.archived) return '';
-  if (acc.provider !== 'stripe' && acc.provider !== 'paypal') return '';
+  if (!AUTO_CAPTURE_PROVIDERS.includes(acc.provider)) return '';
   const health = webhookHealth[acc.id];
   const accountAgeDays = Math.round((new Date() - new Date(acc.createdAt)) / 86400000);
   if (!health) {
@@ -618,7 +623,7 @@ function renderAccountGrid() {
     // Real balance from Stripe/PayPal's own API, as opposed to `b.available`
     // above (our own sum of unwithdrawn transactions) -- shown side by side
     // so a mismatch between the two is visible rather than silently trusted.
-    const syncable = acc.provider === 'stripe' || acc.provider === 'paypal';
+    const syncable = AUTO_CAPTURE_PROVIDERS.includes(acc.provider);
     const syncAction = syncable
       ? `<button class="icon-btn" data-sync-account="${acc.id}" data-sync-provider="${acc.provider}" title="Sync real balance/fees from ${providerLabel(acc.provider)}">⟳</button>`
       : '';
@@ -792,11 +797,11 @@ function renderFeedRow(item) {
     // second look -- normally that account's payments should arrive via
     // webhook, so this could mean one was missed (or it's a deliberate
     // exception, e.g. a phone order) rather than the expected path.
-    if (t.source === 'manual' && !isRefund && acc && (acc.provider === 'stripe' || acc.provider === 'paypal')) {
+    if (t.source === 'manual' && !isRefund && acc && AUTO_CAPTURE_PROVIDERS.includes(acc.provider)) {
       metaBits.push(`<span class="is-warn" title="${escapeHtml(acc.name)} is wired for auto-capture -- double check this wasn't also captured by a webhook">missed webhook?</span>`);
     }
     if (t.note) metaBits.push(escapeHtml(t.note));
-    const amountTitle = withdrawn ? '' : (autoCaptured ? 'title="Confirmed by Stripe/PayPal -- not editable"' : '');
+    const amountTitle = withdrawn ? '' : (autoCaptured ? 'title="Confirmed by Stripe/PayPal/Square -- not editable"' : '');
     const displayAmount = isRefund ? -t.amount : t.amount;
     return `<div class="feed-row">
       <div class="feed-row__left">

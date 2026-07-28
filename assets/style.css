@@ -35,6 +35,12 @@
   --paypal:      #1770B8;
   --paypal-soft: #E7F1FA;
   --paypal-line: #B7D8F0;
+  /* Graphite, not green -- Square's own brand green would collide with the
+     money-in color (--pine) above, and this file's whole point is that color
+     never gets spent on both meanings at once. */
+  --square:      #2B2B2B;
+  --square-soft: #EAEAE6;
+  --square-line: #C9C9C2;
 
   --radius-lg: 20px;
   --radius-md: 14px;
@@ -146,6 +152,7 @@ h1, h2, h3, p { margin: 0; }
 }
 .provider-badge--stripe { background: var(--stripe-soft); color: var(--stripe); border-color: var(--stripe-line); }
 .provider-badge--paypal { background: var(--paypal-soft); color: var(--paypal); border-color: var(--paypal-line); }
+.provider-badge--square { background: var(--square-soft); color: var(--square); border-color: var(--square-line); }
 .provider-badge--invoice, .provider-badge--other { background: var(--paper-sunken); color: var(--ink-muted); border-color: var(--rule); }
 .account__meta {
   font-family: var(--font-mono); font-size: 11px; color: var(--ink-muted); margin-top: 5px;

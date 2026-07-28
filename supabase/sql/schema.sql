@@ -15,7 +15,7 @@ create extension if not exists "pgcrypto"; -- for gen_random_uuid() (still used 
 create table accounts (
   id text primary key,
   name text not null,
-  provider text not null check (provider in ('stripe', 'paypal', 'invoice', 'other')),
+  provider text not null check (provider in ('stripe', 'paypal', 'square', 'invoice', 'other')),
   payment_link text,                 -- the buy.stripe.com / paypal.me link people pay into
   stripe_payment_link_id text,       -- Stripe's plink_xxx id -- used to match incoming webhooks to this account
   paypal_payee_email text,           -- used to match incoming PayPal webhooks to this account
@@ -48,7 +48,7 @@ create table withdrawals (
   -- provider payout (as opposed to one you built by hand in the withdraw
   -- modal) -- provider_payout_id makes re-running sync idempotent (a payout
   -- Stripe/PayPal already reported once is never recorded twice).
-  provider text check (provider in ('stripe', 'paypal')),
+  provider text check (provider in ('stripe', 'paypal', 'square')),
   provider_payout_id text
 );
 create unique index withdrawals_provider_payout_id_idx on withdrawals(provider_payout_id) where provider_payout_id is not null;
@@ -70,7 +70,7 @@ create table transactions (
   id text primary key,
   account_id text not null references accounts(id),
   type text not null default 'deposit' check (type in ('deposit', 'adjustment', 'refund')),
-  source text not null check (source in ('manual', 'stripe_webhook', 'paypal_webhook')),
+  source text not null check (source in ('manual', 'stripe_webhook', 'paypal_webhook', 'square_webhook')),
   amount numeric(14,2) not null check (amount > 0),
   currency text not null,
   note text,
@@ -104,7 +104,7 @@ create index transactions_withdrawal_idx on transactions(withdrawal_id);
 -- `error` set) even though it never produced a transaction.
 create table webhook_events (
   id uuid primary key default gen_random_uuid(),
-  provider text not null check (provider in ('stripe', 'paypal')),
+  provider text not null check (provider in ('stripe', 'paypal', 'square')),
   external_event_id text not null,
   account_id text references accounts(id),
   payload jsonb not null,
