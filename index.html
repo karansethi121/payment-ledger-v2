@@ -6,52 +6,58 @@
 <title>Payment Ledger</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-<link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600;700&family=Plus+Jakarta+Sans:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+<link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600;700&family=Instrument+Sans:wght@400;500;600;700&display=swap" rel="stylesheet">
 <link rel="stylesheet" href="assets/style.css">
 <link rel="manifest" href="manifest.json">
-<meta name="theme-color" content="#0b0d12">
+<meta name="theme-color" content="#F6F5F1">
 <link rel="apple-touch-icon" href="assets/icons/icon-192.png">
 <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.110.9/dist/umd/supabase.min.js"
         integrity="sha384-XtYxyIfxexJVTROWK0+c5T8tJ2ItsVLcdgR5nJIoo6WzQqaBZoTPGgbS7XvkRNBZ"
         crossorigin="anonymous"></script>
 </head>
 <body>
-<div class="shell">
+<div class="app-shell">
 
-  <header class="top">
-    <div class="brand"><span class="dot"></span><h1>Payment Ledger</h1></div>
-    <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;">
+  <header class="topbar">
+    <div class="brand"><span class="mark"></span><h1>Payment Ledger</h1></div>
+    <div class="topbar__right">
       <span class="mode-pill" id="modePill">Demo mode</span>
-      <div class="top-actions">
-        <button class="btn btn-ghost" id="addAccountBtn">+ Account</button>
-        <button class="btn btn-primary" id="addPaymentBtn">+ Payment</button>
-      </div>
+      <button class="btn btn-ghost" id="addAccountBtn">+ Account</button>
+      <button class="btn btn-primary" id="addPaymentBtn">+ Payment</button>
     </div>
   </header>
 
-  <div class="hero-totals" id="heroTotals"></div>
+  <div id="heroTotals"></div>
 
-  <div class="section-label">Accounts</div>
-  <div class="account-grid" id="accountGrid"></div>
-
-  <div class="section-label">Activity</div>
-  <div class="activity-controls">
-    <input class="search-input" id="feedSearch" type="text" placeholder="🔍 Search note, amount, account...">
-    <input class="date-input" id="feedFrom" type="date" title="From date" style="width:auto;">
-    <input class="date-input" id="feedTo" type="date" title="To date" style="width:auto;">
-    <button class="btn btn-ghost" id="feedDateClear" style="display:none;">Clear dates</button>
+  <div class="section">
+    <div class="section__head"><span class="section__label">Accounts</span></div>
+    <div class="accounts" id="accountGrid"></div>
   </div>
-  <div class="filter-row" id="feedFilterRow"></div>
-  <div id="feedContent"></div>
 
-  <div class="section-label" style="margin-top:34px;">Data</div>
-  <div class="data-card">
-    <div class="data-row">
-      <button class="btn btn-ghost" id="exportCsvBtn">⬇ Export CSV</button>
-      <button class="btn btn-ghost" id="exportJsonBtn">⬇ Export JSON Backup</button>
-      <button class="btn btn-ghost" id="importJsonBtn">⬆ Import JSON Backup</button>
-      <button class="btn btn-ghost" id="fxRatesBtn">⚙ FX Rates</button>
-      <input type="file" id="importJsonInput" accept=".json" style="display:none;">
+  <div class="section">
+    <div class="section__head"><span class="section__label">Activity</span></div>
+    <div class="toolbar">
+      <input class="search-input" id="feedSearch" type="text" placeholder="Search note, amount, account…">
+      <div class="toolbar__dates">
+        <input class="date-input" id="feedFrom" type="date" title="From date">
+        <input class="date-input" id="feedTo" type="date" title="To date">
+        <button class="btn btn-ghost" id="feedDateClear" style="display:none;">Clear</button>
+      </div>
+    </div>
+    <div class="tabs" id="feedFilterRow"></div>
+    <div id="feedContent"></div>
+  </div>
+
+  <div class="section">
+    <div class="section__head"><span class="section__label">Data</span></div>
+    <div class="data-panel">
+      <div class="data-row">
+        <button class="btn btn-ghost" id="exportCsvBtn">Export CSV</button>
+        <button class="btn btn-ghost" id="exportJsonBtn">Export backup</button>
+        <button class="btn btn-ghost" id="importJsonBtn">Import backup</button>
+        <button class="btn btn-ghost" id="fxRatesBtn">FX rates</button>
+        <input type="file" id="importJsonInput" accept=".json" style="display:none;">
+      </div>
     </div>
   </div>
 
@@ -71,11 +77,11 @@
 <!-- Manual payment modal -->
 <div class="modal-overlay" id="paymentModal">
   <div class="modal-sheet">
-    <h3>Log a Payment</h3>
+    <h3>Log a payment</h3>
     <p class="modal-sub">For invoice accounts, or anything auto-capture missed.</p>
 
     <p class="field-label">Account</p>
-    <select class="select-input" id="payAccount" style="font-family:'Plus Jakarta Sans',sans-serif;font-weight:400;"></select>
+    <select class="select-input" id="payAccount" style="font-family:'Instrument Sans',sans-serif;font-weight:400;"></select>
 
     <p class="field-label">Amount</p>
     <div class="amount-row">
@@ -90,12 +96,12 @@
     <p class="field-label">Date</p>
     <input class="date-input" id="payDate" type="date">
 
-    <p class="field-label">Note <span style="text-transform:none;font-weight:400;color:var(--text-dim);">(optional)</span></p>
+    <p class="field-label">Note <span style="text-transform:none;font-weight:400;color:var(--ink-muted);">(optional)</span></p>
     <input class="text-input" id="payNote" type="text" placeholder="e.g. batch of 5, ref #3">
 
     <div class="modal-actions">
       <button class="modal-cancel" id="paymentCancel">Cancel</button>
-      <button class="modal-confirm" id="paymentSave">Add Payment</button>
+      <button class="modal-confirm" id="paymentSave">Add payment</button>
     </div>
   </div>
 </div>
@@ -103,7 +109,7 @@
 <!-- Edit deposit modal -->
 <div class="modal-overlay" id="editModal">
   <div class="modal-sheet">
-    <h3>Edit Payment</h3>
+    <h3>Edit payment</h3>
     <p class="modal-sub" id="editSub"></p>
 
     <p class="field-label">Amount</p>
@@ -166,30 +172,30 @@
 <!-- Account modal -->
 <div class="modal-overlay" id="accountModal">
   <div class="modal-sheet">
-    <h3 id="accountModalTitle">Add Account</h3>
+    <h3 id="accountModalTitle">Add account</h3>
     <p class="modal-sub">Fill in the matching fields so auto-capture can find this account.</p>
 
     <p class="field-label">Name</p>
     <input class="text-input" id="accName" type="text" placeholder="e.g. Jane Doe">
 
     <p class="field-label">Provider</p>
-    <select class="select-input" id="accProvider" style="width:100%;font-family:'Plus Jakarta Sans',sans-serif;font-weight:400;">
+    <select class="select-input" id="accProvider" style="width:100%;font-family:'Instrument Sans',sans-serif;font-weight:400;">
       <option value="stripe">Stripe</option>
       <option value="paypal">PayPal</option>
       <option value="invoice">Invoice-only</option>
       <option value="other">Other</option>
     </select>
 
-    <p class="field-label">Payment link <span style="text-transform:none;font-weight:400;color:var(--text-dim);">(shown to payers)</span></p>
+    <p class="field-label">Payment link <span style="text-transform:none;font-weight:400;color:var(--ink-muted);">(shown to payers)</span></p>
     <input class="text-input" id="accLink" type="text" placeholder="https://...">
 
     <div id="accStripeWrap">
-      <p class="field-label">Stripe Payment Link ID <span style="text-transform:none;font-weight:400;color:var(--text-dim);">(for auto-capture, optional)</span></p>
+      <p class="field-label">Stripe Payment Link ID <span style="text-transform:none;font-weight:400;color:var(--ink-muted);">(for auto-capture, optional)</span></p>
       <input class="text-input" id="accStripeLinkId" type="text" placeholder="plink_...">
     </div>
 
     <div id="accPaypalWrap">
-      <p class="field-label">PayPal payee email <span style="text-transform:none;font-weight:400;color:var(--text-dim);">(for auto-capture, optional)</span></p>
+      <p class="field-label">PayPal payee email <span style="text-transform:none;font-weight:400;color:var(--ink-muted);">(for auto-capture, optional)</span></p>
       <input class="text-input" id="accPaypalEmail" type="text" placeholder="you@example.com">
     </div>
 
@@ -208,7 +214,7 @@
 <!-- FX rates modal -->
 <div class="modal-overlay" id="fxModal">
   <div class="modal-sheet">
-    <h3>FX Rates</h3>
+    <h3>FX rates</h3>
     <p class="modal-sub">Manual rates for one rollup total across currencies. Not live &mdash; update these yourself as real rates move.</p>
 
     <p class="field-label">Home currency</p>

@@ -335,7 +335,7 @@ function staleWarningTag(acc) {
   const lastDate = accTx.reduce((max, t) => (t.occurredAt > max ? t.occurredAt : max), accTx[0].occurredAt);
   const days = Math.round((new Date(todayISO() + 'T00:00:00') - new Date(lastDate + 'T00:00:00')) / 86400000);
   if (days > STALE_DAYS_THRESHOLD) {
-    return `<span class="tag warning" title="Last payment ${fmtDate(lastDate)}">⚠ ${days}d quiet</span>`;
+    return `<span class="is-warn" title="Last payment ${fmtDate(lastDate)}">${days}d quiet</span>`;
   }
   return '';
 }
@@ -354,36 +354,50 @@ function sparklineData(accountId, currency, days = 14) {
 }
 function renderSparkline(buckets) {
   const max = Math.max(...buckets, 0.01);
-  return `<div class="sparkline">${buckets.map((v) => `<div class="bar" style="height:${Math.max(2, (v / max) * 28)}px"></div>`).join('')}</div>`;
+  return `<div class="sparkline">${buckets.map((v) => `<div class="bar" style="height:${Math.max(2, (v / max) * 24)}px"></div>`).join('')}</div>`;
 }
 
 /* ================= Render: hero totals ================= */
+// One dominant figure, not a row of equal chips -- the balance is the content,
+// so it gets the typographic weight. Multiple currencies fold into a single
+// FX rollup as the hero, with the per-currency breakdown demoted to a quiet
+// list underneath (rather than competing with the total for attention).
 function renderHero() {
   const totals = {};
   accounts.forEach((acc) => {
     const bal = computeBalances(acc.id);
     Object.entries(bal).forEach(([cur, v]) => { totals[cur] = (totals[cur] || 0) + v.available; });
   });
-  const strip = $('heroTotals');
+  const wrap = $('heroTotals');
   const entries = Object.entries(totals);
+
   if (entries.length === 0) {
-    strip.innerHTML = `<div class="hero-chip"><div class="lbl">Available</div><div class="val" style="color:var(--text-dim)">—</div></div>`;
+    wrap.innerHTML = `<div class="hero">
+      <div class="hero__label">Available</div>
+      <div class="hero__figure hero__figure--empty">—</div>
+    </div>`;
     return;
   }
-  let html = entries.map(([cur, val]) => `
-    <div class="hero-chip"><div class="lbl">${cur} Available</div><div class="val">${fmt(val, cur)}</div></div>
-  `).join('');
 
-  if (entries.length > 1) {
-    const rollup = computeRollupTotal(totals);
-    html += `<div class="hero-chip" style="cursor:pointer;" id="fxRollupChip" title="Manual FX rates -- click to edit">
-      <div class="lbl">≈ ${fxHomeCurrency} Total &middot; ⚙</div>
-      <div class="val">${fmt(rollup, fxHomeCurrency)}</div>
+  if (entries.length === 1) {
+    const [cur, val] = entries[0];
+    wrap.innerHTML = `<div class="hero">
+      <div class="hero__label">Available</div>
+      <div class="hero__figure ${val < 0 ? 'is-negative' : ''}">${fmt(val, cur)}</div>
     </div>`;
+    return;
   }
-  strip.innerHTML = html;
-  const chip = $('fxRollupChip');
-  if (chip) chip.addEventListener('click', openFxModal);
+
+  const rollup = computeRollupTotal(totals);
+  const rows = entries.map(([cur, val]) => `
+    <div class="hero__row"><span>${cur}</span><span class="${val < 0 ? 'is-negative' : ''}">${fmt(val, cur)}</span></div>
+  `).join('');
+  wrap.innerHTML = `<div class="hero">
+    <button class="hero__label hero__label--link" id="fxRollupChip" title="Manual FX rates -- click to edit">≈ ${fxHomeCurrency} Available &middot; edit rates ⚙</button>
+    <div class="hero__figure ${rollup < 0 ? 'is-negative' : ''}">${fmt(rollup, fxHomeCurrency)}</div>
+    <div class="hero__breakdown">${rows}</div>
+  </div>`;
+  $('fxRollupChip').addEventListener('click', openFxModal);
 }
 
 function computeRollupTotal(totalsByCurrency) {
@@ -459,31 +473,39 @@ function renderAccountGrid() {
           const b = bal[cur];
           const withdrawn = lifetimeWithdrawn(acc.id, cur);
           const refundedLine = b.refunded > 0 ? ` &middot; refunded ${fmt(b.refunded, cur)}` : '';
-          return `<div>
-            <div class="balance-row"><span class="cur">${cur}</span><span class="amt ${b.available < 0 ? 'negative' : ''}">${fmt(b.available, cur)}</span></div>
+          return `<div class="balance">
+            <div class="balance__row"><span class="balance__cur">${cur}</span><span class="balance__amt ${b.available < 0 ? 'is-negative' : ''}">${fmt(b.available, cur)}</span></div>
             ${renderSparkline(sparklineData(acc.id, cur))}
-            <div class="balance-row"><span class="sub">${b.count} pending &middot; lifetime ${fmt(b.lifetime, cur)}${refundedLine}</span><span class="sub">withdrawn ${fmt(withdrawn, cur)}</span></div>
-            ${b.available > 0 ? `<button class="btn btn-ghost" style="width:100%;margin-top:2px;" data-withdraw-account="${acc.id}" data-withdraw-currency="${cur}" data-withdraw-gross="${b.available}">Withdraw ${cur}</button>` : ''}
+            <div class="balance__foot"><span>${b.count} pending &middot; lifetime ${fmt(b.lifetime, cur)}${refundedLine}</span><span>withdrawn ${fmt(withdrawn, cur)}</span></div>
+            ${b.available > 0 ? `<button class="btn btn-outline balance__withdraw" data-withdraw-account="${acc.id}" data-withdraw-currency="${cur}" data-withdraw-gross="${b.available}">Withdraw ${cur}</button>` : ''}
           </div>`;
-        }).join('<div style="height:1px;background:var(--border-color);margin:2px 0;"></div>')
-      : `<p class="sub" style="color:var(--text-dim);font-size:12.5px;margin:0;">No payments yet.</p>`;
+        }).join('')
+      : `<p style="color:var(--ink-muted);font-size:12.5px;margin:0;padding-top:14px;">No payments yet.</p>`;
 
-    // Only flag "no link" for stripe/paypal/other accounts -- when provider is
-    // already 'invoice' the provider tag itself says that, so a second badge
-    // saying the same thing is just noise.
-    const noLinkInvoiceTag = (!acc.paymentLink && acc.provider !== 'invoice') ? '<span class="tag invoice">📄 Invoice</span>' : '';
-    const staleTag = staleWarningTag(acc);
+    // Provider is plain text, not a colored pill -- color is reserved for money
+    // state (positive/negative/warning), not branding or bookkeeping facts.
+    // Same reasoning drops the redundant "Invoice" badge when the provider
+    // field already says that.
+    const flags = [];
+    if (acc.archived) flags.push('Archived');
+    if (!acc.paymentLink && acc.provider !== 'invoice') flags.push('No link');
+    const staleFlag = staleWarningTag(acc);
+    if (staleFlag) flags.push(staleFlag);
+    const metaFlags = flags.map((f) => ` &middot; ${f}`).join('');
 
-    return `<div class="account-card ${acc.archived ? 'archived' : ''}">
-      <div class="head">
-        <span class="name">${escapeHtml(acc.name)} <span class="tag ${acc.provider}">${providerLabel(acc.provider)}</span>${acc.archived ? '<span class="tag other">Archived</span>' : ''}${noLinkInvoiceTag}${staleTag}</span>
-        <div class="head-actions">
-          ${acc.paymentLink ? `<button class="copy-link-btn" data-copy-account="${acc.id}" title="Copy payment link">🔗 Copy</button>` : ''}
-          <button class="icon-btn" data-edit-account="${acc.id}" title="Edit">✎</button>
+    return `<article class="account ${acc.archived ? 'is-archived' : ''}">
+      <div class="account__head">
+        <div class="account__title">
+          <h3>${escapeHtml(acc.name)}</h3>
+          <div class="account__meta">${providerLabel(acc.provider)}${metaFlags}</div>
+        </div>
+        <div class="account__actions">
+          ${acc.paymentLink ? `<button class="copy-link-btn" data-copy-account="${acc.id}" title="Copy payment link">🔗</button>` : ''}
+          <button class="icon-btn" data-edit-account="${acc.id}" title="Edit account">✎</button>
         </div>
       </div>
-      <div class="balances">${balanceBlocks}</div>
-    </div>`;
+      <div class="account__balances">${balanceBlocks}</div>
+    </article>`;
   }).join('');
 
   grid.querySelectorAll('[data-withdraw-account]').forEach((btn) => {
@@ -529,7 +551,7 @@ function copyAccountLink(btn) {
 function renderFeedFilters() {
   const row = $('feedFilterRow');
   const chips = [{ id: 'all', label: 'All' }, ...accounts.map((a) => ({ id: a.id, label: a.name }))];
-  row.innerHTML = chips.map((c) => `<button class="filter-chip ${activeFeedFilter === c.id ? 'active' : ''}" data-filter="${c.id}">${escapeHtml(c.label)}</button>`).join('');
+  row.innerHTML = chips.map((c) => `<button class="tab ${activeFeedFilter === c.id ? 'active' : ''}" data-filter="${c.id}">${escapeHtml(c.label)}</button>`).join('');
   row.querySelectorAll('[data-filter]').forEach((btn) => {
     btn.addEventListener('click', () => { activeFeedFilter = btn.dataset.filter; renderFeedFilters(); renderFeed(); });
   });
@@ -562,16 +584,20 @@ function renderFeedRow(item) {
     const editable = !withdrawn && !autoCaptured;
     const deletable = !withdrawn && !autoCaptured;
     const confirming = deleteConfirmId === t.id;
-    const sourceTag = t.source === 'manual' ? '<span class="tag source-manual">&#9998; Manual</span>' : '<span class="tag source-auto">&#9889; Auto</span>';
-    const kindTag = isRefund ? '<span class="tag warning">&#8617; Refund</span>' : '';
+    // Source/kind read as plain words in the meta line, not colored badges --
+    // the amount's own color (pine/rust) and sign already say "refund"; a
+    // second badge repeating that was just noise competing for attention.
+    const metaBits = [fmtDate(t.occurredAt), t.source === 'manual' ? 'Manual' : 'Auto-captured'];
+    if (isRefund) metaBits.push('Refund');
+    if (t.note) metaBits.push(escapeHtml(t.note));
     const amountTitle = withdrawn ? '' : (autoCaptured ? 'title="Confirmed by Stripe/PayPal -- not editable"' : '');
     const displayAmount = isRefund ? -t.amount : t.amount;
     return `<div class="feed-row">
-      <div class="feed-left">
-        <span class="who">${escapeHtml(acc ? acc.name : 'Unknown')} ${sourceTag}${kindTag}</span>
-        <span class="meta">${fmtDate(t.occurredAt)}${t.note ? ' &middot; ' + escapeHtml(t.note) : ''}</span>
+      <div class="feed-row__left">
+        <span class="feed-row__who">${escapeHtml(acc ? acc.name : 'Unknown')}</span>
+        <span class="feed-row__meta">${metaBits.join(' · ')}</span>
       </div>
-      <div class="feed-right">
+      <div class="feed-row__right">
         <span class="feed-amount ${isRefund ? 'refund' : 'deposit'} ${withdrawn ? 'locked' : ''}" ${amountTitle}>${fmt(displayAmount, t.currency)}</span>
         ${editable ? `<button class="icon-btn edit-btn" data-id="${t.id}" title="Edit">&#9998;</button>` : ''}
         ${deletable ? `<button class="icon-btn delete-btn ${confirming ? 'confirming' : ''}" data-id="${t.id}" title="Delete">${confirming ? 'Confirm' : '&#10005;'}</button>` : ''}
@@ -585,11 +611,11 @@ function renderFeedRow(item) {
   const displayAmount = converted ? w.payoutNet : w.net;
   const displayCurrency = converted ? w.payoutCurrency : w.currency;
   return `<div class="feed-row">
-    <div class="feed-left">
-      <span class="who">${escapeHtml(acc ? acc.name : 'Unknown')} <span class="tag other">Withdrawal</span></span>
-      <span class="meta">${fmtDate(w.createdAt.slice(0, 10))} &middot; ${w.transactionCount} payment${w.transactionCount === 1 ? '' : 's'} &middot; ${w.commissionPct}% commission${metaConversion}</span>
+    <div class="feed-row__left">
+      <span class="feed-row__who">${escapeHtml(acc ? acc.name : 'Unknown')} &middot; Withdrawal</span>
+      <span class="feed-row__meta">${fmtDate(w.createdAt.slice(0, 10))} &middot; ${w.transactionCount} payment${w.transactionCount === 1 ? '' : 's'} &middot; ${w.commissionPct}% commission${metaConversion}</span>
     </div>
-    <div class="feed-right"><span class="feed-amount withdrawal">${fmt(displayAmount, displayCurrency)}</span></div>
+    <div class="feed-row__right"><span class="feed-amount withdrawal">${fmt(displayAmount, displayCurrency)}</span></div>
   </div>`;
 }
 
