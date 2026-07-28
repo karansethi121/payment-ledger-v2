@@ -83,7 +83,7 @@ account-access key stay separate:
 
 ```bash
 supabase secrets set STRIPE_API_KEYS_JSON='[{"accountId":"karan-stripe","apiKey":"rk_live_..."},{"accountId":"ugu-stripe","apiKey":"rk_live_..."}]'
-supabase functions deploy stripe-sync --no-verify-jwt
+supabase functions deploy stripe-sync
 ```
 
 Use a **restricted key** (Stripe Dashboard -> Developers -> API keys -> Create restricted
@@ -92,8 +92,17 @@ and **Payouts** is all this function ever calls. Same `accountId` values as
 `STRIPE_ACCOUNTS_JSON`, one entry per Stripe account. Run the migration in
 [`supabase/sql/migrations/0002_stripe_sync.sql`](supabase/sql/migrations/0002_stripe_sync.sql)
 against the database first (`supabase/sql/schema.sql` already has these columns inline for
-a brand-new project). Unlike the webhook functions, this one is called by the browser, not
-by Stripe, so `--no-verify-jwt` is what lets the anon-key frontend invoke it directly.
+a brand-new project).
+
+Unlike the webhook functions (deployed `--no-verify-jwt` since Stripe/PayPal call them with
+no Supabase credential at all), `stripe-sync` is deployed **with** JWT verification -- the
+frontend already sends the anon key automatically via `supabase.functions.invoke`, so this
+costs the legitimate caller nothing, while ruling out completely credential-less requests.
+It is not per-user authorization (this app has none anywhere -- single shared anon key, RLS
+disabled by design, see `schema.sql`); anyone holding the anon key (which is public in
+`assets/app.js`, same as every other table in this app) can still call it. What it does add:
+CORS locked to the real site origin, and a one-sync-per-account-per-minute cooldown, so a
+found or reused URL can't be used to hammer Stripe's API on the account's real key.
 
 ## Setting this up from scratch (a new deployment)
 

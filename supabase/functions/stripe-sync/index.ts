@@ -8,7 +8,21 @@
 // secret in STRIPE_ACCOUNTS_JSON. A restricted key with read-only access to
 // Balance, Balance Transactions, and Payouts is enough:
 //   supabase secrets set STRIPE_API_KEYS_JSON='[{"accountId":"karan-stripe","apiKey":"rk_live_..."},{"accountId":"ugu-stripe","apiKey":"rk_live_..."}]'
-//   supabase functions deploy stripe-sync --no-verify-jwt
+//   supabase functions deploy stripe-sync
+//
+// Deployed WITH JWT verification (no --no-verify-jwt) -- unlike
+// stripe-webhook, which Stripe calls with no Supabase credential at all,
+// this is called by the frontend, which already sends the anon key as a
+// bearer token via supabase-js automatically, so requiring it costs the
+// legitimate caller nothing. This app has no per-user auth anywhere (single
+// shared anon key, RLS disabled by deliberate design -- see schema.sql), so
+// there's no "is this caller allowed to sync this account" check to layer on
+// top of that; what JWT verification actually buys here is ruling out
+// completely credential-less requests (blind internet scanning), not
+// per-user authorization. Given this function is the only place a real
+// Stripe secret key gets used to call a third-party API, it also rate-limits
+// itself per account (see MIN_SYNC_INTERVAL_MS below) so repeated calls
+// can't be used to hammer Stripe's API or burn through its rate limit.
 //
 // Three things happen per call, all idempotent (safe to click "Sync" again):
 //   1. Balance.retrieve() -> accounts.balance_available/currency/synced_at
@@ -32,9 +46,15 @@ const SUPABASE_SERVICE_ROLE_KEY = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY") ?? "
 const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY);
 
 const corsHeaders = {
-  "Access-Control-Allow-Origin": "*",
+  "Access-Control-Allow-Origin": "https://karansethi121.github.io",
   "Access-Control-Allow-Headers": "authorization, x-client-info, apikey, content-type",
 };
+
+// One sync per account per minute, regardless of how many requests come in --
+// bounds the worst case (unauthenticated but JWT-required callers hammering
+// this endpoint) to a fixed rate of real Stripe API calls, independent of
+// request volume.
+const MIN_SYNC_INTERVAL_MS = 60_000;
 
 Deno.serve(async (req) => {
   if (req.method === "OPTIONS") return new Response("ok", { headers: corsHeaders });
@@ -50,7 +70,19 @@ Deno.serve(async (req) => {
 
   const keyConfig = STRIPE_API_KEYS.find((k) => k.accountId === accountId);
   if (!keyConfig) {
-    return json({ error: `No Stripe API key configured for account "${accountId}". Add one to STRIPE_API_KEYS_JSON.` }, 400);
+    // Deliberately generic (no confirmation the account exists or is just
+    // missing a key) -- costs nothing and avoids an enumeration oracle, even
+    // though account ids aren't otherwise treated as secret in this app.
+    return json({ error: "Sync is not available for this account." }, 404);
+  }
+
+  const { data: acct } = await supabase.from("accounts").select("balance_synced_at").eq("id", accountId).maybeSingle();
+  if (acct?.balance_synced_at) {
+    const sinceLast = Date.now() - new Date(acct.balance_synced_at).getTime();
+    if (sinceLast < MIN_SYNC_INTERVAL_MS) {
+      const wait = Math.ceil((MIN_SYNC_INTERVAL_MS - sinceLast) / 1000);
+      return json({ error: `Synced too recently -- try again in ${wait}s.` }, 429);
+    }
   }
 
   const stripe = new Stripe(keyConfig.apiKey, { apiVersion: "2023-10-16" });
