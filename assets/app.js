@@ -1191,7 +1191,9 @@ function updateWithdrawCalc() {
   $('withdrawGross').textContent = payoutCurrency !== currency
     ? `${fmt(convertCurrency(gross, currency, payoutCurrency), payoutCurrency)} (${fmt(gross, currency)})`
     : fmt(gross, currency);
-  $('withdrawCommissionAmt').textContent = fmt(commissionAmt, currency);
+  $('withdrawCommissionAmt').textContent = payoutCurrency !== currency
+    ? `${fmt(convertCurrency(commissionAmt, currency, payoutCurrency), payoutCurrency)} (${fmt(commissionAmt, currency)})`
+    : fmt(commissionAmt, currency);
 
   const fxNote = $('withdrawFxNote');
   if (payoutCurrency !== currency) {
