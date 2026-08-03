@@ -10,10 +10,12 @@ const USE_SUPABASE = /^https:\/\//.test(SUPABASE_URL) && !SUPABASE_URL.includes(
 let accounts = [];
 let transactions = [];
 let withdrawals = [];
+let settlements = [];
 let outbox = [];
 let editingPaymentId = null;
 let editingAccountId = null;
 let pendingWithdraw = null;
+let pendingSettle = null;
 let deleteConfirmId = null;
 let activeFeedFilter = 'all';
 let feedSearchQuery = '';
@@ -37,6 +39,7 @@ let fxRatesUpdatedAt = null;
 const LS_ACCOUNTS = 'ledgerv2:accounts';
 const LS_TRANSACTIONS = 'ledgerv2:transactions';
 const LS_WITHDRAWALS = 'ledgerv2:withdrawals';
+const LS_SETTLEMENTS = 'ledgerv2:settlements';
 const LS_OUTBOX = 'ledgerv2:outbox';
 const LS_SEEDED = 'ledgerv2:seeded';
 const LS_FXRATES = 'ledgerv2:fxrates';
@@ -161,6 +164,13 @@ function rowFromWithdrawal(w) {
     transaction_count: w.transactionCount, created_at: w.createdAt
   };
 }
+function rowFromSettlement(s) {
+  return {
+    id: s.id, currency: s.currency, gross: s.gross,
+    commission_pct: s.commissionPct, commission_amt: s.commissionAmt, net: s.net,
+    withdrawal_count: s.withdrawalCount, created_at: s.createdAt
+  };
+}
 function rowFromAccount(a) {
   return {
     id: a.id, name: a.name, provider: a.provider, payment_link: a.paymentLink || null,
@@ -225,6 +235,17 @@ async function executeOutboxItem(item) {
     case 'tagWithdrawn': {
       const { ids, withdrawalId } = item.payload;
       const { error } = await supabaseClient.from('transactions').update({ withdrawal_id: withdrawalId }).in('id', ids);
+      if (error) throw error;
+      return;
+    }
+    case 'insertSettlement': {
+      const { error } = await supabaseClient.from('settlements').insert(rowFromSettlement(item.payload));
+      if (error && error.code !== '23505') throw error;
+      return;
+    }
+    case 'tagSettled': {
+      const { ids, settlementId } = item.payload;
+      const { error } = await supabaseClient.from('withdrawals').update({ settlement_id: settlementId }).in('id', ids);
       if (error) throw error;
       return;
     }
@@ -318,6 +339,24 @@ const storageAdapter = {
     return val ? JSON.parse(val) : [];
   },
 
+  async getSettlements() {
+    if (supabaseClient) {
+      try {
+        const { data, error } = await supabaseClient.from('settlements').select('*').order('created_at', { ascending: false });
+        if (error) throw error;
+        return data.map((s) => ({
+          id: s.id, currency: s.currency, gross: Number(s.gross),
+          commissionPct: Number(s.commission_pct), commissionAmt: Number(s.commission_amt), net: Number(s.net),
+          withdrawalCount: s.withdrawal_count, createdAt: s.created_at
+        }));
+      } catch (e) {
+        console.warn('Cloud read for settlements failed, using local cache:', e);
+      }
+    }
+    const val = localStorage.getItem(LS_SETTLEMENTS);
+    return val ? JSON.parse(val) : [];
+  },
+
   // Purely observational (never written to from the client), so there's no
   // local cache/outbox path here -- if this fails, the health indicator just
   // doesn't show rather than blocking anything else.
@@ -379,6 +418,21 @@ const storageAdapter = {
       if (coveredIds.length > 0) queueOutbox('tagWithdrawn', { ids: coveredIds, withdrawalId: withdrawal.id });
       await flushOutbox();
     }
+  },
+
+  // Mirrors processWithdrawal above -- covered withdrawals get tagged with
+  // this settlement's id instead of being destroyed, so each one's own
+  // commission_pct/commission_amt/net stays intact and auditable.
+  async processSettlement(settlement, coveredWithdrawalIds) {
+    settlements.unshift(settlement);
+    withdrawals = withdrawals.map((w) => (coveredWithdrawalIds.includes(w.id) ? { ...w, settlementId: settlement.id } : w));
+    localStorage.setItem(LS_SETTLEMENTS, JSON.stringify(settlements));
+    localStorage.setItem(LS_WITHDRAWALS, JSON.stringify(withdrawals));
+    if (supabaseClient) {
+      queueOutbox('insertSettlement', settlement);
+      if (coveredWithdrawalIds.length > 0) queueOutbox('tagSettled', { ids: coveredWithdrawalIds, settlementId: settlement.id });
+      await flushOutbox();
+    }
   }
 };
 
@@ -402,6 +456,25 @@ function computeBalances(accountId) {
 }
 function lifetimeWithdrawn(accountId, currency) {
   return withdrawals.filter((w) => w.accountId === accountId && w.currency === currency).reduce((s, w) => s + w.gross, 0);
+}
+
+// Withdrawals not yet folded into a settlement -- i.e. money that's landed in
+// your bank but hasn't been forwarded to your friend yet. Grouped by
+// payoutCurrency (not the original charge currency) since that's the actual
+// currency sitting in the bank account, and settlements can only bundle
+// withdrawals that share one.
+function unsettledWithdrawals(payoutCurrency) {
+  return withdrawals.filter((w) => !w.settlementId && (w.payoutCurrency || w.currency) === payoutCurrency);
+}
+function unsettledTotalsByCurrency() {
+  const totals = {}; // payoutCurrency -> { net, count }
+  withdrawals.filter((w) => !w.settlementId).forEach((w) => {
+    const cur = w.payoutCurrency || w.currency;
+    if (!totals[cur]) totals[cur] = { net: 0, count: 0 };
+    totals[cur].net += w.payoutNet ?? w.net;
+    totals[cur].count += 1;
+  });
+  return totals;
 }
 
 // Flags an account with no payment activity (manual or auto) in a while --
@@ -815,16 +888,27 @@ function renderFeedRow(item) {
       </div>
     </div>`;
   }
+  if (item.kind === 'settlement') {
+    const s = item.data;
+    return `<div class="feed-row">
+      <div class="feed-row__left">
+        <span class="feed-row__who">Settlement &middot; sent to friend</span>
+        <span class="feed-row__meta">${fmtDate(s.createdAt.slice(0, 10))} &middot; ${s.withdrawalCount} withdrawal${s.withdrawalCount === 1 ? '' : 's'} bundled &middot; ${s.commissionPct}% commission</span>
+      </div>
+      <div class="feed-row__right"><span class="feed-amount withdrawal">${fmt(s.net, s.currency)}</span></div>
+    </div>`;
+  }
   const w = item.data;
   const acc = accountById(w.accountId);
   const converted = w.payoutCurrency && w.payoutCurrency !== w.currency;
   const metaConversion = converted ? ` &middot; converted from ${fmt(w.net, w.currency)}` : '';
   const displayAmount = converted ? w.payoutNet : w.net;
   const displayCurrency = converted ? w.payoutCurrency : w.currency;
+  const settledTag = w.settlementId ? ' &middot; settled' : '';
   return `<div class="feed-row">
     <div class="feed-row__left">
       <span class="feed-row__who">${escapeHtml(acc ? acc.name : 'Unknown')} &middot; Withdrawal</span>
-      <span class="feed-row__meta">${fmtDate(w.createdAt.slice(0, 10))} &middot; ${w.transactionCount} payment${w.transactionCount === 1 ? '' : 's'} &middot; ${w.commissionPct}% commission${metaConversion}</span>
+      <span class="feed-row__meta">${fmtDate(w.createdAt.slice(0, 10))} &middot; ${w.transactionCount} payment${w.transactionCount === 1 ? '' : 's'} &middot; ${w.commissionPct}% commission${metaConversion}${settledTag}</span>
     </div>
     <div class="feed-row__right"><span class="feed-amount withdrawal">${fmt(displayAmount, displayCurrency)}</span></div>
   </div>`;
@@ -840,8 +924,11 @@ function getFilteredFeedItems() {
   let items = [];
   transactions.forEach((t) => items.push({ kind: 'deposit', date: t.occurredAt, ts: t.createdAt, data: t }));
   withdrawals.forEach((w) => items.push({ kind: 'withdrawal', date: w.createdAt.slice(0, 10), ts: w.createdAt, data: w }));
+  settlements.forEach((s) => items.push({ kind: 'settlement', date: s.createdAt.slice(0, 10), ts: s.createdAt, data: s }));
 
-  if (activeFeedFilter !== 'all') items = items.filter((i) => i.data.accountId === activeFeedFilter);
+  // Settlements aren't tied to one account -- an account filter should only
+  // ever hide them, never crash comparing accountId to undefined.
+  if (activeFeedFilter !== 'all') items = items.filter((i) => i.kind !== 'settlement' && i.data.accountId === activeFeedFilter);
   if (feedDateFrom) items = items.filter((i) => i.date >= feedDateFrom);
   if (feedDateTo) items = items.filter((i) => i.date <= feedDateTo);
 
@@ -917,13 +1004,21 @@ function renderReports() {
     monthTotals[t.currency][monthKey === thisMonthKey ? 'thisMonth' : 'lastMonth'] += signedAmount;
   });
 
+  // Commission is now taken in two places: at withdrawal time (w.commissionAmt,
+  // in the original charge currency) and again, optionally, at settlement time
+  // (s.commissionAmt, in the payout currency being bundled) -- combined here
+  // into one lifetime-commission-per-currency total since both are real money
+  // kept as commission, just taken at different steps of the same payout.
   const commissionTotals = {}; // currency -> lifetime commission paid
   withdrawals.forEach((w) => { commissionTotals[w.currency] = (commissionTotals[w.currency] || 0) + w.commissionAmt; });
+  settlements.forEach((s) => { commissionTotals[s.currency] = (commissionTotals[s.currency] || 0) + s.commissionAmt; });
 
   const monthCurrencies = Object.keys(monthTotals);
   const commissionCurrencies = Object.keys(commissionTotals);
+  const unsettledTotals = unsettledTotalsByCurrency();
+  const unsettledCurrencies = Object.keys(unsettledTotals);
 
-  if (monthCurrencies.length === 0 && commissionCurrencies.length === 0) {
+  if (monthCurrencies.length === 0 && commissionCurrencies.length === 0 && unsettledCurrencies.length === 0) {
     panel.innerHTML = `<p style="color:var(--ink-muted);font-size:12.5px;margin:0;">No activity yet to report on.</p>`;
     return;
   }
@@ -950,7 +1045,21 @@ function renderReports() {
     </div>
   `).join('');
 
-  panel.innerHTML = monthRows + commissionRows;
+  // Money that's landed in the bank (withdrawn from some provider account)
+  // but hasn't been bundled into a settlement and sent to your friend yet --
+  // the "Settle" button opens the same style of checklist modal as Withdraw,
+  // just spanning every account that shares this payout currency.
+  const unsettledRows = unsettledCurrencies.map((cur) => `
+    <div class="report-row">
+      <span class="report-row__label">Awaiting settlement &middot; ${cur} <span style="font-weight:400;color:var(--ink-muted);">(${unsettledTotals[cur].count} withdrawal${unsettledTotals[cur].count === 1 ? '' : 's'})</span></span>
+      <span class="report-row__value">${fmt(unsettledTotals[cur].net, cur)} <button class="btn btn-outline" data-settle-currency="${cur}" style="margin-left:8px;padding:2px 10px;font-size:12px;">Settle</button></span>
+    </div>
+  `).join('');
+
+  panel.innerHTML = monthRows + commissionRows + unsettledRows;
+  panel.querySelectorAll('[data-settle-currency]').forEach((btn) => {
+    btn.addEventListener('click', () => openSettleModal(btn.dataset.settleCurrency));
+  });
 }
 
 function renderAll() {
@@ -1258,6 +1367,131 @@ $('withdrawConfirm').addEventListener('click', async () => {
   showToast(`Withdrew ${fmt(payoutNet, payoutCurrency)} from ${acc.name}`);
 });
 
+/* ================= Modal: settle ================= */
+// Opened from the Reports panel's "Settle" button for a given payout
+// currency (not tied to one account -- that's the whole point: it bundles
+// unsettled withdrawals across every Stripe/PayPal/Square account that
+// happened to pay out in this currency). Mirrors openWithdrawModal/
+// renderWithdrawChecklist/recalcWithdrawGross/updateWithdrawCalc below,
+// just one level up the chain: withdrawals stand in for transactions, and a
+// settlement stands in for a withdrawal.
+function openSettleModal(currency) {
+  const pending = unsettledWithdrawals(currency)
+    .sort((a, b) => a.createdAt.localeCompare(b.createdAt));
+  pendingSettle = { currency, pending, selected: new Set(pending.map((w) => w.id)), gross: 0 };
+
+  $('settleTitle').textContent = `Settle — ${currency}`;
+  $('settleSub').textContent = `${pending.length} unsettled withdrawal${pending.length === 1 ? '' : 's'}`;
+  $('settleSendingCurrencyLabel').textContent = ` (${currency})`;
+  $('settleSendingAmount').value = '';
+  $('settleCommissionPct').value = 0;
+  renderSettleChecklist();
+  recalcSettleGross();
+  $('settleModal').classList.add('show');
+}
+function closeSettleModal() { $('settleModal').classList.remove('show'); pendingSettle = null; }
+
+function renderSettleChecklist() {
+  const list = $('settleChecklist');
+  const { pending, selected, currency } = pendingSettle;
+  if (pending.length === 0) {
+    list.innerHTML = `<div class="withdraw-row"><span class="withdraw-row__meta">Nothing unsettled in this currency.</span></div>`;
+  } else {
+    list.innerHTML = pending.map((w) => {
+      const acc = accountById(w.accountId);
+      const metaLine = `${fmtDate(w.createdAt.slice(0, 10))} · ${escapeHtml(acc ? acc.name : 'Unknown')} · ${w.transactionCount} payment${w.transactionCount === 1 ? '' : 's'}`;
+      return `<label class="withdraw-row">
+        <input type="checkbox" data-settle-row="${w.id}" ${selected.has(w.id) ? 'checked' : ''}>
+        <span class="withdraw-row__meta"><span><b>${fmt(w.payoutNet, currency)}</b></span><span>${metaLine}</span></span>
+      </label>`;
+    }).join('');
+  }
+  list.querySelectorAll('[data-settle-row]').forEach((box) => {
+    box.addEventListener('change', () => {
+      const id = box.dataset.settleRow;
+      if (box.checked) pendingSettle.selected.add(id); else pendingSettle.selected.delete(id);
+      recalcSettleGross();
+    });
+  });
+}
+
+function recalcSettleGross() {
+  const { pending, selected, currency } = pendingSettle;
+  const gross = pending.reduce((sum, w) => (selected.has(w.id) ? sum + w.payoutNet : sum), 0);
+  pendingSettle.gross = gross;
+  $('settleSelectedCount').textContent = ` (${selected.size}/${pending.length})`;
+
+  const typed = parseFloat($('settleSendingAmount').value);
+  const note = $('settleAutoSelectNote');
+  if (!isNaN(typed) && Math.abs(typed - gross) > 0.01) {
+    note.textContent = `Checked withdrawals total ${fmt(gross, currency)}, not the ${fmt(typed, currency)} entered — adjust the checklist above to match what you're actually sending.`;
+    note.style.display = 'block';
+  } else {
+    note.style.display = 'none';
+  }
+  updateSettleCalc();
+}
+
+// Same product decision as selectTransactionsForAmount above, one level up:
+// given the amount you're actually about to send your friend, which
+// unsettled withdrawals does that most plausibly cover? Left as a stub for
+// the same reason -- greedy oldest-first, exact-subset-match, and "manual
+// only" are all defensible and it's your call which fits how you actually
+// pick what to bundle.
+// TODO: implement the auto-select strategy you want here.
+function selectWithdrawalsForAmount(pending, targetAmount) {
+  return [];
+}
+
+$('settleSendingAmount').addEventListener('change', () => {
+  if (!pendingSettle) return;
+  const target = parseFloat($('settleSendingAmount').value);
+  if (isNaN(target)) return;
+  const ids = selectWithdrawalsForAmount(pendingSettle.pending, target);
+  if (ids && ids.length) {
+    pendingSettle.selected = new Set(ids);
+    renderSettleChecklist();
+  }
+  recalcSettleGross();
+});
+
+function updateSettleCalc() {
+  if (!pendingSettle) return;
+  const { gross, currency } = pendingSettle;
+  const pct = parseFloat($('settleCommissionPct').value) || 0;
+  const commissionAmt = gross * (pct / 100);
+  const net = gross - commissionAmt;
+
+  $('settleGross').textContent = fmt(gross, currency);
+  $('settleCommissionAmt').textContent = fmt(commissionAmt, currency);
+  $('settleNet').textContent = fmt(net, currency);
+}
+
+$('settleCommissionPct').addEventListener('input', updateSettleCalc);
+$('settleCancel').addEventListener('click', closeSettleModal);
+$('settleModal').addEventListener('click', (e) => { if (e.target.id === 'settleModal') closeSettleModal(); });
+$('settleConfirm').addEventListener('click', async () => {
+  if (!pendingSettle) return;
+  const { currency, gross, pending, selected } = pendingSettle;
+  if (selected.size === 0) { showToast('Check at least one withdrawal to settle'); return; }
+  const pct = parseFloat($('settleCommissionPct').value) || 0;
+  const commissionAmt = gross * (pct / 100);
+  const net = gross - commissionAmt;
+
+  const covered = pending.filter((w) => selected.has(w.id));
+  const coveredIds = covered.map((w) => w.id);
+
+  const settlement = {
+    id: uid(), currency, gross, commissionPct: pct, commissionAmt, net,
+    withdrawalCount: covered.length, createdAt: new Date().toISOString()
+  };
+
+  await storageAdapter.processSettlement(settlement, coveredIds);
+  closeSettleModal();
+  renderAll();
+  showToast(`Sent ${fmt(net, currency)} to your friend`);
+});
+
 /* ================= Modal: account ================= */
 function toggleAccProviderFields() {
   const provider = $('accProvider').value;
@@ -1450,6 +1684,7 @@ function seedDemoData() {
   accounts = await storageAdapter.getAccounts();
   transactions = await storageAdapter.getTransactions();
   withdrawals = await storageAdapter.getWithdrawals();
+  settlements = await storageAdapter.getSettlements();
   renderAll();
 
   storageAdapter.getWebhookHealth().then((health) => { webhookHealth = health; renderAccountGrid(); });
@@ -1475,6 +1710,10 @@ function seedDemoData() {
       })
       .on('postgres_changes', { event: '*', schema: 'public', table: 'withdrawals' }, async () => {
         withdrawals = await storageAdapter.getWithdrawals();
+        renderAll();
+      })
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'settlements' }, async () => {
+        settlements = await storageAdapter.getSettlements();
         renderAll();
       })
       .on('postgres_changes', { event: '*', schema: 'public', table: 'accounts' }, async () => {
