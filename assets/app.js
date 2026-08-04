@@ -1392,7 +1392,7 @@ function openSettleModal(currency) {
 
   $('settleTitle').textContent = `Settle — ${currency}`;
   $('settleSub').textContent = `${pending.length} unsettled withdrawal${pending.length === 1 ? '' : 's'}`;
-  $('settleCommissionPct').value = 0;
+  $('settleCommissionPct').value = 10;
   renderSettleChecklist();
   recalcSettleGross();
   $('settleModal').classList.add('show');
