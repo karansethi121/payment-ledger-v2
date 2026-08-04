@@ -1382,8 +1382,6 @@ function openSettleModal(currency) {
 
   $('settleTitle').textContent = `Settle — ${currency}`;
   $('settleSub').textContent = `${pending.length} unsettled withdrawal${pending.length === 1 ? '' : 's'}`;
-  $('settleSendingCurrencyLabel').textContent = ` (${currency})`;
-  $('settleSendingAmount').value = '';
   $('settleCommissionPct').value = 0;
   renderSettleChecklist();
   recalcSettleGross();
@@ -1416,44 +1414,25 @@ function renderSettleChecklist() {
 }
 
 function recalcSettleGross() {
-  const { pending, selected, currency } = pendingSettle;
+  const { pending, selected } = pendingSettle;
   const gross = pending.reduce((sum, w) => (selected.has(w.id) ? sum + w.payoutNet : sum), 0);
   pendingSettle.gross = gross;
   $('settleSelectedCount').textContent = ` (${selected.size}/${pending.length})`;
-
-  const typed = parseFloat($('settleSendingAmount').value);
-  const note = $('settleAutoSelectNote');
-  if (!isNaN(typed) && Math.abs(typed - gross) > 0.01) {
-    note.textContent = `Checked withdrawals total ${fmt(gross, currency)}, not the ${fmt(typed, currency)} entered — adjust the checklist above to match what you're actually sending.`;
-    note.style.display = 'block';
-  } else {
-    note.style.display = 'none';
-  }
   updateSettleCalc();
 }
 
-// Same product decision as selectTransactionsForAmount above, one level up:
-// given the amount you're actually about to send your friend, which
-// unsettled withdrawals does that most plausibly cover? Left as a stub for
-// the same reason -- greedy oldest-first, exact-subset-match, and "manual
-// only" are all defensible and it's your call which fits how you actually
-// pick what to bundle.
-// TODO: implement the auto-select strategy you want here.
-function selectWithdrawalsForAmount(pending, targetAmount) {
-  return [];
+// Every figure here leads with the settlement's own currency and always
+// shows a GBP/USD pair -- whichever one isn't the native currency gets
+// converted via the same USD reference rates as the rest of the app (see
+// convertCurrency, defined above in the withdraw modal section). Mirrors the
+// withdraw modal's "payout currency (charge currency)" dual display, just
+// pinned to GBP/USD specifically since that's the pair that matters when
+// telling your friend what they're owed.
+function fmtGbpUsd(amount, currency) {
+  if (currency === 'USD') return `${fmt(amount, 'USD')} (${fmt(convertCurrency(amount, 'USD', 'GBP'), 'GBP')})`;
+  const usd = convertCurrency(amount, currency, 'USD');
+  return currency === 'GBP' ? `${fmt(amount, 'GBP')} (${fmt(usd, 'USD')})` : `${fmt(amount, currency)} (${fmt(usd, 'USD')})`;
 }
-
-$('settleSendingAmount').addEventListener('change', () => {
-  if (!pendingSettle) return;
-  const target = parseFloat($('settleSendingAmount').value);
-  if (isNaN(target)) return;
-  const ids = selectWithdrawalsForAmount(pendingSettle.pending, target);
-  if (ids && ids.length) {
-    pendingSettle.selected = new Set(ids);
-    renderSettleChecklist();
-  }
-  recalcSettleGross();
-});
 
 function updateSettleCalc() {
   if (!pendingSettle) return;
@@ -1462,9 +1441,12 @@ function updateSettleCalc() {
   const commissionAmt = gross * (pct / 100);
   const net = gross - commissionAmt;
 
-  $('settleGross').textContent = fmt(gross, currency);
-  $('settleCommissionAmt').textContent = fmt(commissionAmt, currency);
-  $('settleNet').textContent = fmt(net, currency);
+  // Gross (before commission) leads, exactly like the withdraw modal's
+  // "Selected total" -- commission is applied on top of it, not the other
+  // way around, so what you owe your friend is always the last figure shown.
+  $('settleGross').textContent = fmtGbpUsd(gross, currency);
+  $('settleCommissionAmt').textContent = fmtGbpUsd(commissionAmt, currency);
+  $('settleNet').textContent = fmtGbpUsd(net, currency);
 }
 
 $('settleCommissionPct').addEventListener('input', updateSettleCalc);
