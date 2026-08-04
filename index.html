@@ -184,27 +184,27 @@
   </div>
 </div>
 
-<!-- Settle modal: bundles several already-withdrawn payouts (any account,
-     any provider) that share a payout currency into one lump payment out to
-     your friend. -->
+<!-- Settle modal: one combined checklist spanning every unsettled withdrawal
+     across every account, provider, and payout currency. Confirming creates
+     one settlement record per currency present in the selection (a bank
+     transfer only ever moves one currency at a time), but it's a single
+     button/click from your side -- new withdrawals just keep piling into
+     this same pool until you come settle up. -->
 <div class="modal-overlay" id="settleModal">
   <div class="modal-sheet">
     <h3 id="settleTitle">Settle</h3>
     <p class="modal-sub" id="settleSub"></p>
 
-    <p class="modal-note">Money that's already landed in your bank from separate Stripe/PayPal/Square withdrawals, not yet forwarded. Pick which withdrawals this settlement covers — the total below is what clients originally paid, before any commission.</p>
+    <p class="modal-note">Money that's already landed in your bank from separate Stripe/PayPal/Square withdrawals, not yet forwarded. Pick which withdrawals this settlement covers — the totals below are what clients originally paid, before any commission.</p>
 
     <div class="field-label">Covers these withdrawals<span id="settleSelectedCount"></span></div>
     <div class="withdraw-checklist" id="settleChecklist"></div>
 
-    <div class="modal-row"><span class="label">Received from clients</span><span class="value" id="settleGross"></span></div>
     <div class="modal-row">
       <span class="label">Commission</span>
       <span class="value"><input class="commission-input" id="settleCommissionPct" type="number" value="10" min="0" max="100" step="0.1">%</span>
     </div>
-    <div class="modal-row"><span class="label">Commission taken</span><span class="value" id="settleCommissionAmt"></span></div>
-    <p class="modal-note" id="settleBankNote" style="display:none;"></p>
-    <div class="modal-row net"><span class="label">You send your friend</span><span class="value" id="settleNet"></span></div>
+    <div id="settleSummary"></div>
 
     <p class="modal-note">Confirming marks only the checked withdrawals as settled and records this as a settlement. Nothing is deleted — each withdrawal's own commission stays visible below, just marked settled.</p>
 
