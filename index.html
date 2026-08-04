@@ -192,17 +192,18 @@
     <h3 id="settleTitle">Settle</h3>
     <p class="modal-sub" id="settleSub"></p>
 
-    <p class="modal-note">Money that's already landed in your bank from separate Stripe/PayPal/Square withdrawals, not yet forwarded. Pick which withdrawals this settlement covers — the total before commission is below, same as a withdrawal.</p>
+    <p class="modal-note">Money that's already landed in your bank from separate Stripe/PayPal/Square withdrawals, not yet forwarded. Pick which withdrawals this settlement covers — the total below is what clients originally paid, before any commission.</p>
 
     <div class="field-label">Covers these withdrawals<span id="settleSelectedCount"></span></div>
     <div class="withdraw-checklist" id="settleChecklist"></div>
 
-    <div class="modal-row"><span class="label">Selected total</span><span class="value" id="settleGross"></span></div>
+    <div class="modal-row"><span class="label">Received from clients</span><span class="value" id="settleGross"></span></div>
     <div class="modal-row">
-      <span class="label">Extra commission</span>
+      <span class="label">Commission</span>
       <span class="value"><input class="commission-input" id="settleCommissionPct" type="number" value="0" min="0" max="100" step="0.1">%</span>
     </div>
     <div class="modal-row"><span class="label">Commission taken</span><span class="value" id="settleCommissionAmt"></span></div>
+    <p class="modal-note" id="settleBankNote" style="display:none;"></p>
     <div class="modal-row net"><span class="label">You send your friend</span><span class="value" id="settleNet"></span></div>
 
     <p class="modal-note">Confirming marks only the checked withdrawals as settled and records this as a settlement. Nothing is deleted — each withdrawal's own commission stays visible below, just marked settled.</p>

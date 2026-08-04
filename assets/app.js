@@ -329,7 +329,8 @@ const storageAdapter = {
           commissionPct: Number(w.commission_pct), commissionAmt: Number(w.commission_amt), net: Number(w.net),
           payoutCurrency: w.payout_currency || w.currency, payoutNet: w.payout_net != null ? Number(w.payout_net) : Number(w.net),
           fxRateUsed: w.fx_rate_used != null ? Number(w.fx_rate_used) : 1,
-          transactionCount: w.transaction_count, createdAt: w.created_at
+          transactionCount: w.transaction_count, createdAt: w.created_at,
+          settlementId: w.settlement_id
         }));
       } catch (e) {
         console.warn('Cloud read for withdrawals failed, using local cache:', e);
@@ -1364,7 +1365,16 @@ $('withdrawConfirm').addEventListener('click', async () => {
   await storageAdapter.processWithdrawal(withdrawal, coveredIds);
   closeWithdrawModal();
   renderAll();
-  showToast(`Withdrew ${fmt(payoutNet, payoutCurrency)} from ${acc.name}`);
+  // processWithdrawal's cloud writes go through the outbox, which swallows
+  // failures and retries silently (see flushOutbox) -- fine for something
+  // that's safe to retry unattended, but a failed "mark these transactions
+  // withdrawn" write means they'll look pending again next reload, and get
+  // withdrawn a second time. Surface that loudly instead of claiming success.
+  if (outbox.length > 0) {
+    showToast(`Saved locally but ${outbox.length} change${outbox.length === 1 ? '' : 's'} failed to sync — hit "Retry now" in the banner before withdrawing again, or these payments may look pending again.`);
+  } else {
+    showToast(`Withdrew ${fmt(payoutNet, payoutCurrency)} from ${acc.name}`);
+  }
 });
 
 /* ================= Modal: settle ================= */
@@ -1378,7 +1388,7 @@ $('withdrawConfirm').addEventListener('click', async () => {
 function openSettleModal(currency) {
   const pending = unsettledWithdrawals(currency)
     .sort((a, b) => a.createdAt.localeCompare(b.createdAt));
-  pendingSettle = { currency, pending, selected: new Set(pending.map((w) => w.id)), gross: 0 };
+  pendingSettle = { currency, pending, selected: new Set(pending.map((w) => w.id)), grossUSD: 0, bankAvailable: 0 };
 
   $('settleTitle').textContent = `Settle — ${currency}`;
   $('settleSub').textContent = `${pending.length} unsettled withdrawal${pending.length === 1 ? '' : 's'}`;
@@ -1397,10 +1407,13 @@ function renderSettleChecklist() {
   } else {
     list.innerHTML = pending.map((w) => {
       const acc = accountById(w.accountId);
-      const metaLine = `${fmtDate(w.createdAt.slice(0, 10))} · ${escapeHtml(acc ? acc.name : 'Unknown')} · ${w.transactionCount} payment${w.transactionCount === 1 ? '' : 's'}`;
+      // Leads with what the client actually paid (w.gross, pre-any-commission)
+      // -- payoutNet is what that already netted down to after the
+      // withdrawal's own commission + FX, shown as context alongside it.
+      const metaLine = `${fmtDate(w.createdAt.slice(0, 10))} · ${escapeHtml(acc ? acc.name : 'Unknown')} · ${w.transactionCount} payment${w.transactionCount === 1 ? '' : 's'} · already netted to ${fmt(w.payoutNet, currency)} (${w.commissionPct}% taken)`;
       return `<label class="withdraw-row">
         <input type="checkbox" data-settle-row="${w.id}" ${selected.has(w.id) ? 'checked' : ''}>
-        <span class="withdraw-row__meta"><span><b>${fmt(w.payoutNet, currency)}</b></span><span>${metaLine}</span></span>
+        <span class="withdraw-row__meta"><span><b>${fmt(w.gross, w.currency)}</b></span><span>${metaLine}</span></span>
       </label>`;
     }).join('');
   }
@@ -1413,40 +1426,65 @@ function renderSettleChecklist() {
   });
 }
 
+// Anchors the settlement to what clients actually paid (w.gross, in each
+// withdrawal's own charge currency -- converted to USD as the common unit
+// since that's what your clients pay in), not what already landed in the
+// bank net of the withdrawal's own commission. bankAvailable tracks that
+// already-netted figure separately, purely so updateSettleCalc can warn if
+// the commission you set here would work out to owing your friend more than
+// is actually sitting in the bank from these withdrawals.
 function recalcSettleGross() {
   const { pending, selected } = pendingSettle;
-  const gross = pending.reduce((sum, w) => (selected.has(w.id) ? sum + w.payoutNet : sum), 0);
-  pendingSettle.gross = gross;
+  let grossUSD = 0, bankAvailable = 0;
+  pending.forEach((w) => {
+    if (!selected.has(w.id)) return;
+    grossUSD += convertCurrency(w.gross, w.currency, 'USD');
+    bankAvailable += w.payoutNet;
+  });
+  pendingSettle.grossUSD = grossUSD;
+  pendingSettle.bankAvailable = bankAvailable;
   $('settleSelectedCount').textContent = ` (${selected.size}/${pending.length})`;
   updateSettleCalc();
 }
 
-// Every figure here leads with the settlement's own currency and always
-// shows a GBP/USD pair -- whichever one isn't the native currency gets
-// converted via the same USD reference rates as the rest of the app (see
-// convertCurrency, defined above in the withdraw modal section). Mirrors the
-// withdraw modal's "payout currency (charge currency)" dual display, just
-// pinned to GBP/USD specifically since that's the pair that matters when
-// telling your friend what they're owed.
-function fmtGbpUsd(amount, currency) {
-  if (currency === 'USD') return `${fmt(amount, 'USD')} (${fmt(convertCurrency(amount, 'USD', 'GBP'), 'GBP')})`;
-  const usd = convertCurrency(amount, currency, 'USD');
-  return currency === 'GBP' ? `${fmt(amount, 'GBP')} (${fmt(usd, 'USD')})` : `${fmt(amount, currency)} (${fmt(usd, 'USD')})`;
+// Dollars lead, with the bank/payout currency (what actually moves) in
+// brackets -- skips the bracket entirely when they're the same currency.
+function fmtUsdFirst(amountUSD, amountBank, bankCurrency) {
+  if (bankCurrency === 'USD') return fmt(amountUSD, 'USD');
+  return `${fmt(amountUSD, 'USD')} (${fmt(amountBank, bankCurrency)})`;
 }
 
 function updateSettleCalc() {
   if (!pendingSettle) return;
-  const { gross, currency } = pendingSettle;
+  const { grossUSD, bankAvailable, currency } = pendingSettle;
   const pct = parseFloat($('settleCommissionPct').value) || 0;
-  const commissionAmt = gross * (pct / 100);
-  const net = gross - commissionAmt;
+  const commissionUSD = grossUSD * (pct / 100);
+  const netUSD = grossUSD - commissionUSD;
+  const grossBank = convertCurrency(grossUSD, 'USD', currency);
+  const commissionBank = convertCurrency(commissionUSD, 'USD', currency);
+  const netBank = convertCurrency(netUSD, 'USD', currency);
 
-  // Gross (before commission) leads, exactly like the withdraw modal's
-  // "Selected total" -- commission is applied on top of it, not the other
-  // way around, so what you owe your friend is always the last figure shown.
-  $('settleGross').textContent = fmtGbpUsd(gross, currency);
-  $('settleCommissionAmt').textContent = fmtGbpUsd(commissionAmt, currency);
-  $('settleNet').textContent = fmtGbpUsd(net, currency);
+  // Gross (before commission, anchored to what clients paid) leads, exactly
+  // like the withdraw modal's "Selected total" -- commission is applied on
+  // top of it, not the other way around, so what you owe your friend is
+  // always the last figure shown.
+  $('settleGross').textContent = fmtUsdFirst(grossUSD, grossBank, currency);
+  $('settleCommissionAmt').textContent = fmtUsdFirst(commissionUSD, commissionBank, currency);
+  $('settleNet').textContent = fmtUsdFirst(netUSD, netBank, currency);
+
+  // Because this commission is now calculated off the full original client
+  // payment rather than what's already netted into the bank, a commission
+  // rate too low here can compute a "you owe your friend" figure that
+  // exceeds what these withdrawals actually left in the bank -- surface that
+  // rather than let it quietly ask you to send money that isn't there.
+  const bankNote = $('settleBankNote');
+  if (netBank > bankAvailable + 0.01) {
+    bankNote.textContent = `⚠️ At ${pct}% commission this works out to ${fmt(netBank, currency)}, but these withdrawals only left ${fmt(bankAvailable, currency)} in the bank after their own commission. Raise the commission % or check fewer withdrawals.`;
+    bankNote.style.display = 'block';
+  } else {
+    bankNote.textContent = `Currently in the bank from these withdrawals: ${fmt(bankAvailable, currency)}.`;
+    bankNote.style.display = 'block';
+  }
 }
 
 $('settleCommissionPct').addEventListener('input', updateSettleCalc);
@@ -1454,11 +1492,14 @@ $('settleCancel').addEventListener('click', closeSettleModal);
 $('settleModal').addEventListener('click', (e) => { if (e.target.id === 'settleModal') closeSettleModal(); });
 $('settleConfirm').addEventListener('click', async () => {
   if (!pendingSettle) return;
-  const { currency, gross, pending, selected } = pendingSettle;
+  const { currency, grossUSD, pending, selected } = pendingSettle;
   if (selected.size === 0) { showToast('Check at least one withdrawal to settle'); return; }
   const pct = parseFloat($('settleCommissionPct').value) || 0;
-  const commissionAmt = gross * (pct / 100);
-  const net = gross - commissionAmt;
+  const commissionUSD = grossUSD * (pct / 100);
+  const netUSD = grossUSD - commissionUSD;
+  const gross = convertCurrency(grossUSD, 'USD', currency);
+  const commissionAmt = convertCurrency(commissionUSD, 'USD', currency);
+  const net = convertCurrency(netUSD, 'USD', currency);
 
   const covered = pending.filter((w) => selected.has(w.id));
   const coveredIds = covered.map((w) => w.id);
@@ -1471,7 +1512,14 @@ $('settleConfirm').addEventListener('click', async () => {
   await storageAdapter.processSettlement(settlement, coveredIds);
   closeSettleModal();
   renderAll();
-  showToast(`Sent ${fmt(net, currency)} to your friend`);
+  // Same reasoning as the withdraw confirm above -- a failed tagSettled sync
+  // means these withdrawals will look unsettled again on next load, and can
+  // get bundled into a second, duplicate settlement.
+  if (outbox.length > 0) {
+    showToast(`Saved locally but ${outbox.length} change${outbox.length === 1 ? '' : 's'} failed to sync — hit "Retry now" in the banner before settling again, or these withdrawals may look unsettled again.`);
+  } else {
+    showToast(`Sent ${fmt(net, currency)} to your friend`);
+  }
 });
 
 /* ================= Modal: account ================= */
