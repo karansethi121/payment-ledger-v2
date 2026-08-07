@@ -197,7 +197,10 @@
 
     <p class="modal-note">Money that's already landed in your bank from separate Stripe/PayPal/Square withdrawals, not yet forwarded. Pick which withdrawals this settlement covers — the totals below are what clients originally paid, before any commission.</p>
 
-    <div class="field-label">Covers these withdrawals<span id="settleSelectedCount"></span></div>
+    <div class="field-label">
+      <span>Covers these withdrawals<span id="settleSelectedCount"></span></span>
+      <button type="button" class="settle-toggle-payments" id="settleTogglePayments">Hide individual payments</button>
+    </div>
     <div class="withdraw-checklist" id="settleChecklist"></div>
 
     <div class="modal-row">

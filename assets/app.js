@@ -1395,44 +1395,74 @@ $('withdrawConfirm').addEventListener('click', async () => {
 function openSettleModal() {
   const pending = allUnsettledWithdrawals();
   const currencies = [...new Set(pending.map((w) => w.payoutCurrency || w.currency))];
-  pendingSettle = { pending, selected: new Set(pending.map((w) => w.id)), byCurrency: {} };
+  pendingSettle = { pending, selected: new Set(pending.map((w) => w.id)), byCurrency: {}, showPayments: true };
 
   $('settleTitle').textContent = 'Settle up';
   $('settleSub').textContent = `${pending.length} unsettled withdrawal${pending.length === 1 ? '' : 's'}${currencies.length > 1 ? ` across ${currencies.length} currencies` : ''}`;
   $('settleCommissionPct').value = 10;
+  $('settleTogglePayments').textContent = 'Hide individual payments';
   renderSettleChecklist();
   recalcSettleGross();
   $('settleModal').classList.add('show');
 }
 function closeSettleModal() { $('settleModal').classList.remove('show'); pendingSettle = null; }
 
-// Grouped by payout currency with a small header between groups, purely so
-// a mixed USD+GBP checklist doesn't read as one undifferentiated list --
-// checking/unchecking still works per-row exactly like the withdraw modal.
+// Every individual payment (deposit or refund) that got folded into a given
+// withdrawal, tagged via transaction.withdrawalId at withdraw time -- shown
+// so a withdrawal like "$562, 4 payments" can be checked line-by-line
+// against an outside source (e.g. a friend's WhatsApp messages) instead of
+// having to trust the bundled total.
+function renderSettlePayments(withdrawalId, withdrawalCurrency) {
+  const covered = transactions
+    .filter((t) => t.withdrawalId === withdrawalId)
+    .sort((a, b) => a.occurredAt.localeCompare(b.occurredAt));
+  if (covered.length === 0) {
+    return `<div class="settle-payments"><div class="settle-payment-row settle-payment-row--empty">No individual payments on record for this withdrawal.</div></div>`;
+  }
+  const rows = covered.map((t) => {
+    const isRefund = t.type === 'refund';
+    const displayAmount = isRefund ? -t.amount : t.amount;
+    const noteBit = t.note ? ` · ${escapeHtml(t.note)}` : '';
+    return `<div class="settle-payment-row">
+      <span>${fmtDate(t.occurredAt)}${isRefund ? ' · Refund' : ''}${noteBit}</span>
+      <span class="settle-payment-amt ${isRefund ? 'refund' : ''}">${fmt(displayAmount, t.currency)}</span>
+    </div>`;
+  }).join('');
+  return `<div class="settle-payments">${rows}</div>`;
+}
+
+// Flat, ungrouped list -- every unsettled withdrawal across every currency,
+// all shown together with no GBP/USD split, since the summary below now
+// converts everything to one combined USD total anyway. Each row's own
+// amount still shows in its original currency (that's just what that
+// specific withdrawal was), with a USD equivalent alongside for anything
+// not already in USD, so the list stays legible without a currency grouping
+// to lean on. Checking/unchecking still works per-row exactly like the
+// withdraw modal. When showPayments is on, each withdrawal also expands into
+// the individual payments that were bundled into it (see
+// renderSettlePayments) -- on by default since cross-checking a bundled
+// total against an outside source is the whole reason to open this list.
 function renderSettleChecklist() {
   const list = $('settleChecklist');
-  const { pending, selected } = pendingSettle;
+  const { pending, selected, showPayments } = pendingSettle;
   if (pending.length === 0) {
     list.innerHTML = `<div class="withdraw-row"><span class="withdraw-row__meta">Nothing unsettled.</span></div>`;
   } else {
-    const groups = {};
-    pending.forEach((w) => {
+    list.innerHTML = pending.map((w) => {
+      const acc = accountById(w.accountId);
       const cur = w.payoutCurrency || w.currency;
-      (groups[cur] = groups[cur] || []).push(w);
-    });
-    list.innerHTML = Object.keys(groups).sort().map((cur) => {
-      const rows = groups[cur].map((w) => {
-        const acc = accountById(w.accountId);
-        // Leads with what the client actually paid (w.gross, pre-any-commission)
-        // -- payoutNet is what that already netted down to after the
-        // withdrawal's own commission + FX, shown as context alongside it.
-        const metaLine = `${fmtDate(w.createdAt.slice(0, 10))} · ${escapeHtml(acc ? acc.name : 'Unknown')} · ${w.transactionCount} payment${w.transactionCount === 1 ? '' : 's'} · already netted to ${fmt(w.payoutNet, cur)} (${w.commissionPct}% taken)`;
-        return `<label class="withdraw-row">
+      // Leads with what the client actually paid (w.gross, pre-any-commission)
+      // -- payoutNet is what that already netted down to after the
+      // withdrawal's own commission + FX, shown as context alongside it.
+      const metaLine = `${fmtDate(w.createdAt.slice(0, 10))} · ${escapeHtml(acc ? acc.name : 'Unknown')} · ${w.transactionCount} payment${w.transactionCount === 1 ? '' : 's'} · already netted to ${fmt(w.payoutNet, cur)} (${w.commissionPct}% taken)`;
+      const usdEquivalent = w.currency !== 'USD' ? ` <span class="withdraw-row__fx">≈ ${fmt(convertCurrency(w.gross, w.currency, 'USD'), 'USD')}</span>` : '';
+      const paymentsHtml = showPayments ? renderSettlePayments(w.id, cur) : '';
+      return `<div class="settle-item">
+        <label class="withdraw-row">
           <input type="checkbox" data-settle-row="${w.id}" ${selected.has(w.id) ? 'checked' : ''}>
-          <span class="withdraw-row__meta"><span><b>${fmt(w.gross, w.currency)}</b></span><span>${metaLine}</span></span>
-        </label>`;
-      }).join('');
-      return `<div class="withdraw-group-header">${cur}</div>${rows}`;
+          <span class="withdraw-row__meta"><span><b>${fmt(w.gross, w.currency)}</b>${usdEquivalent}</span><span>${metaLine}</span></span>
+        </label>${paymentsHtml}
+      </div>`;
     }).join('');
   }
   list.querySelectorAll('[data-settle-row]').forEach((box) => {
@@ -1468,16 +1498,11 @@ function recalcSettleGross() {
   updateSettleCalc();
 }
 
-// Dollars lead, with the bank/payout currency (what actually moves) in
-// brackets -- skips the bracket entirely when they're the same currency.
-function fmtUsdFirst(amountUSD, amountBank, bankCurrency) {
-  if (bankCurrency === 'USD') return fmt(amountUSD, 'USD');
-  return `${fmt(amountUSD, 'USD')} (${fmt(amountBank, bankCurrency)})`;
-}
-
-// Renders one gross/commission/net block per currency present in the
-// current selection -- the same shared commission % applies to each, but
-// the totals themselves can never merge across currencies.
+// Everything converted to and shown as one combined USD total -- no more
+// separate GBP/USD blocks. Under the hood a bank transfer still can't mix
+// currencies, so settleConfirm below still creates one settlement record
+// per original currency (see byCurrency), each converted back out of this
+// same USD math; this function just stops surfacing that split to the eye.
 function updateSettleCalc() {
   if (!pendingSettle) return;
   const { byCurrency } = pendingSettle;
@@ -1490,34 +1515,46 @@ function updateSettleCalc() {
     return;
   }
 
-  summary.innerHTML = currencies.map((currency) => {
+  let totalGrossUSD = 0, totalCommissionUSD = 0, totalNetUSD = 0;
+  const warnings = [];
+  currencies.forEach((currency) => {
     const { grossUSD, bankAvailable } = byCurrency[currency];
     const commissionUSD = grossUSD * (pct / 100);
     const netUSD = grossUSD - commissionUSD;
-    const grossBank = convertCurrency(grossUSD, 'USD', currency);
-    const commissionBank = convertCurrency(commissionUSD, 'USD', currency);
-    const netBank = convertCurrency(netUSD, 'USD', currency);
+    totalGrossUSD += grossUSD;
+    totalCommissionUSD += commissionUSD;
+    totalNetUSD += netUSD;
 
     // Because this commission is now calculated off the full original client
     // payment rather than what's already netted into the bank, a commission
     // rate too low here can compute a "you owe your friend" figure that
     // exceeds what these withdrawals actually left in the bank -- surface
-    // that rather than let it quietly ask you to send money that isn't
-    // there.
-    const bankNote = netBank > bankAvailable + 0.01
-      ? `⚠️ At ${pct}% commission this works out to ${fmt(netBank, currency)}, but these withdrawals only left ${fmt(bankAvailable, currency)} in the bank after their own commission. Raise the commission % or check fewer withdrawals.`
-      : `Currently in the bank from these withdrawals: ${fmt(bankAvailable, currency)}.`;
+    // that per currency (that's still where an actual shortfall would bite),
+    // even though the totals above are shown combined.
+    const netBank = convertCurrency(netUSD, 'USD', currency);
+    if (netBank > bankAvailable + 0.01) {
+      warnings.push(`⚠️ At ${pct}% commission, the ${currency} withdrawals checked here work out to sending ${fmt(netBank, currency)}, but they only left ${fmt(bankAvailable, currency)} in the bank after their own commission. Raise the commission % or check fewer ${currency} withdrawals.`);
+    }
+  });
 
-    return `
-      <div class="field-label" style="margin-top:14px;">${currency}</div>
-      <div class="modal-row"><span class="label">Received from clients</span><span class="value">${fmtUsdFirst(grossUSD, grossBank, currency)}</span></div>
-      <div class="modal-row"><span class="label">Commission taken</span><span class="value">${fmtUsdFirst(commissionUSD, commissionBank, currency)}</span></div>
-      <p class="modal-note">${bankNote}</p>
-      <div class="modal-row net"><span class="label">You send your friend</span><span class="value">${fmtUsdFirst(netUSD, netBank, currency)}</span></div>
-    `;
-  }).join('');
+  const noteHtml = warnings.length > 0
+    ? warnings.map((w) => `<p class="modal-note">${w}</p>`).join('')
+    : `<p class="modal-note">Sent as ${currencies.length > 1 ? `${currencies.length} separate bank transfers (${currencies.join(' + ')})` : `one ${currencies[0]} bank transfer`}, shown here as a single combined total in USD.</p>`;
+
+  summary.innerHTML = `
+    <div class="modal-row"><span class="label">Received from clients</span><span class="value">${fmt(totalGrossUSD, 'USD')}</span></div>
+    <div class="modal-row"><span class="label">Commission taken</span><span class="value">${fmt(totalCommissionUSD, 'USD')}</span></div>
+    ${noteHtml}
+    <div class="modal-row net"><span class="label">You send your friend</span><span class="value">${fmt(totalNetUSD, 'USD')}</span></div>
+  `;
 }
 
+$('settleTogglePayments').addEventListener('click', () => {
+  if (!pendingSettle) return;
+  pendingSettle.showPayments = !pendingSettle.showPayments;
+  $('settleTogglePayments').textContent = pendingSettle.showPayments ? 'Hide individual payments' : 'Show individual payments';
+  renderSettleChecklist();
+});
 $('settleCommissionPct').addEventListener('input', updateSettleCalc);
 $('settleCancel').addEventListener('click', closeSettleModal);
 $('settleModal').addEventListener('click', (e) => { if (e.target.id === 'settleModal') closeSettleModal(); });

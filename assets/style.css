@@ -287,7 +287,28 @@ h1, h2, h3, p { margin: 0; }
 .checkbox-row span { font-size: 13.5px; font-weight: 600; color: var(--ink-soft); }
 .checkbox-row input[type="checkbox"] { width: 19px; height: 19px; accent-color: var(--pine); cursor: pointer; }
 .withdraw-checklist { max-height: 220px; overflow-y: auto; border: 1px solid var(--rule); border-radius: var(--radius-sm); background: var(--paper-sunken); margin-bottom: 4px; }
-.withdraw-group-header { padding: 6px 12px; font-size: 10.5px; font-weight: 700; letter-spacing: 0.04em; text-transform: uppercase; color: var(--ink-muted); background: var(--paper); border-bottom: 1px solid var(--rule); }
+/* Settle modal's checklist can list every unsettled withdrawal across every
+   account/currency at once, so it's grown well past the 220px withdraw-modal
+   cap by design -- let it expand fully and rely on the modal sheet's own
+   scroll (.modal-sheet max-height/overflow-y above) instead of clipping it. */
+#settleChecklist { max-height: none; overflow-y: visible; }
+.settle-toggle-payments {
+  background: none; border: none; padding: 0; font-family: var(--font-mono); font-size: 10.5px; font-weight: 600;
+  letter-spacing: .07em; text-transform: uppercase; color: var(--pine); cursor: pointer; text-decoration: underline;
+  text-underline-offset: 2px;
+}
+.settle-toggle-payments:hover { color: var(--ink); }
+/* Each withdrawal row plus its optional individual-payments breakdown is one
+   unit for border purposes, since the breakdown is a sibling of .withdraw-row
+   (kept outside the <label> so clicking a payment line never toggles the
+   checkbox) rather than nested inside it. */
+#settleChecklist .withdraw-row { border-bottom: none; }
+#settleChecklist .settle-item { border-bottom: 1px solid var(--rule); }
+#settleChecklist .settle-item:last-child { border-bottom: none; }
+.settle-payments { display: flex; flex-direction: column; gap: 4px; padding: 0 12px 10px 39px; background: var(--paper); }
+.settle-payment-row { display: flex; justify-content: space-between; gap: 10px; font-family: var(--font-mono); font-size: 11px; color: var(--ink-muted); }
+.settle-payment-row--empty { font-style: italic; }
+.settle-payment-amt.refund { color: var(--rust); }
 .withdraw-row { display: flex; align-items: center; gap: 10px; padding: 9px 12px; border-bottom: 1px solid var(--rule); }
 .withdraw-row:last-child { border-bottom: none; }
 .withdraw-row input[type="checkbox"] { width: 17px; height: 17px; accent-color: var(--pine); cursor: pointer; flex-shrink: 0; }
