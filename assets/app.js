@@ -14,6 +14,7 @@ let settlements = [];
 let outbox = [];
 let editingPaymentId = null;
 let editingAccountId = null;
+let accountDeleteConfirming = false;
 let pendingWithdraw = null;
 let pendingSettle = null;
 let deleteConfirmId = null;
@@ -206,6 +207,11 @@ async function executeOutboxItem(item) {
       if (error) throw error;
       return;
     }
+    case 'deleteAccount': {
+      const { error } = await supabaseClient.from('accounts').delete().eq('id', item.payload.id);
+      if (error) throw error;
+      return;
+    }
     case 'insertTransaction': {
       const { error } = await supabaseClient.from('transactions').insert(rowFromTransaction(item.payload));
       if (error && error.code !== '23505') throw error;
@@ -391,6 +397,11 @@ const storageAdapter = {
     accounts = accounts.map((a) => (a.id === id ? { ...a, ...patch } : a));
     localStorage.setItem(LS_ACCOUNTS, JSON.stringify(accounts));
     if (supabaseClient) { queueOutbox('updateAccount', { id, patch }); await flushOutbox(); }
+  },
+  async deleteAccount(id) {
+    accounts = accounts.filter((a) => a.id !== id);
+    localStorage.setItem(LS_ACCOUNTS, JSON.stringify(accounts));
+    if (supabaseClient) { queueOutbox('deleteAccount', { id }); await flushOutbox(); }
   },
 
   async addTransaction(t) {
@@ -1619,9 +1630,18 @@ function openAccountModal(id) {
   $('accArchivedRow').style.display = acc ? 'flex' : 'none';
   $('accArchived').checked = acc ? !!acc.archived : false;
   toggleAccProviderFields();
+  accountDeleteConfirming = false;
+  const deleteBtn = $('accountDeleteBtn');
+  deleteBtn.style.display = acc ? 'block' : 'none';
+  deleteBtn.textContent = 'Delete this account';
+  deleteBtn.classList.remove('confirming');
   $('accountModal').classList.add('show');
 }
-function closeAccountModal() { $('accountModal').classList.remove('show'); editingAccountId = null; }
+function closeAccountModal() {
+  $('accountModal').classList.remove('show');
+  editingAccountId = null;
+  accountDeleteConfirming = false;
+}
 
 $('addAccountBtn').addEventListener('click', () => openAccountModal(null));
 $('accountCancel').addEventListener('click', closeAccountModal);
@@ -1648,6 +1668,35 @@ $('accountSave').addEventListener('click', async () => {
   }
   closeAccountModal();
   renderAll();
+});
+
+// Accounts with any recorded history (deposits, refunds, withdrawals) can't
+// be hard-deleted -- the accounts/withdrawals/transactions FK would reject it
+// anyway (see supabase/sql/schema.sql), and silently cascading that history
+// away would contradict this app's whole "nothing is ever deleted" premise.
+// Archiving already covers that case (hidden from Add Payment, kept in
+// history), so deletion is only offered as a true remove for accounts that
+// were added by mistake and never used.
+$('accountDeleteBtn').addEventListener('click', async () => {
+  const id = editingAccountId;
+  if (!id) return;
+  const hasHistory = transactions.some((t) => t.accountId === id) || withdrawals.some((w) => w.accountId === id);
+  if (hasHistory) {
+    showToast('Can\'t delete -- this account has payment history. Archive it instead to hide it.');
+    return;
+  }
+  const btn = $('accountDeleteBtn');
+  if (!accountDeleteConfirming) {
+    accountDeleteConfirming = true;
+    btn.textContent = 'Click again to confirm delete';
+    btn.classList.add('confirming');
+    return;
+  }
+  accountDeleteConfirming = false;
+  await storageAdapter.deleteAccount(id);
+  closeAccountModal();
+  renderAll();
+  showToast('Account deleted');
 });
 
 /* ================= Data: CSV / JSON export & import ================= */

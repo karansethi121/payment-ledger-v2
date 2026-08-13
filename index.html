@@ -35,20 +35,6 @@
   </div>
 
   <div class="section">
-    <div class="section__head"><span class="section__label">Activity</span></div>
-    <div class="toolbar">
-      <input class="search-input" id="feedSearch" type="text" placeholder="Search note, amount, account…">
-      <div class="toolbar__dates">
-        <input class="date-input" id="feedFrom" type="date" title="From date">
-        <input class="date-input" id="feedTo" type="date" title="To date">
-        <button class="btn btn-ghost" id="feedDateClear" style="display:none;">Clear</button>
-      </div>
-    </div>
-    <div class="tabs" id="feedFilterRow"></div>
-    <div id="feedContent"></div>
-  </div>
-
-  <div class="section">
     <div class="section__head"><span class="section__label">Reports</span></div>
     <div class="data-panel" id="reportsPanel"></div>
   </div>
@@ -64,6 +50,20 @@
         <input type="file" id="importJsonInput" accept=".json" style="display:none;">
       </div>
     </div>
+  </div>
+
+  <div class="section">
+    <div class="section__head"><span class="section__label">Activity</span></div>
+    <div class="toolbar">
+      <input class="search-input" id="feedSearch" type="text" placeholder="Search note, amount, account…">
+      <div class="toolbar__dates">
+        <input class="date-input" id="feedFrom" type="date" title="From date">
+        <input class="date-input" id="feedTo" type="date" title="To date">
+        <button class="btn btn-ghost" id="feedDateClear" style="display:none;">Clear</button>
+      </div>
+    </div>
+    <div class="tabs" id="feedFilterRow"></div>
+    <div id="feedContent"></div>
   </div>
 
 </div>
@@ -253,6 +253,8 @@
       <span>Archived (hidden from Add Payment, kept in history)</span>
       <input type="checkbox" id="accArchived">
     </div>
+
+    <button type="button" class="account-delete-link" id="accountDeleteBtn" style="display:none;">Delete this account</button>
 
     <div class="modal-actions">
       <button class="modal-cancel" id="accountCancel">Cancel</button>

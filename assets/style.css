@@ -222,6 +222,8 @@ h1, h2, h3, p { margin: 0; }
 .tab.active { color: var(--ink); }
 .tab.active::after { background: var(--ink); }
 
+#feedContent { max-height: 60vh; overflow-y: auto; overflow-x: hidden; border: 1px solid var(--rule); border-radius: var(--radius-md); background: var(--paper-raised); padding: 6px 16px; box-shadow: var(--shadow-card); scrollbar-width: thin; }
+#feedContent .empty-state { border: none; background: transparent; box-shadow: none; padding: 40px 4px; }
 .feed { display: flex; flex-direction: column; }
 .feed-row { display: flex; align-items: center; justify-content: space-between; padding: 14px 0; border-bottom: 1px solid var(--rule); gap: 10px; }
 .feed-row:first-child { padding-top: 0; }
@@ -286,6 +288,9 @@ h1, h2, h3, p { margin: 0; }
 .checkbox-row { display: flex; align-items: center; justify-content: space-between; margin: 16px 0 7px; }
 .checkbox-row span { font-size: 13.5px; font-weight: 600; color: var(--ink-soft); }
 .checkbox-row input[type="checkbox"] { width: 19px; height: 19px; accent-color: var(--pine); cursor: pointer; }
+.account-delete-link { display: block; width: 100%; text-align: left; background: none; border: none; padding: 14px 0 0; margin-top: 6px; border-top: 1px solid var(--rule); font-family: var(--font-display); font-size: 13.5px; font-weight: 600; color: var(--rust); cursor: pointer; }
+.account-delete-link:hover { opacity: .8; }
+.account-delete-link.confirming { color: #fff; background: var(--rust); border-top-color: var(--rust); border-radius: var(--radius-sm); padding: 11px 14px; text-align: center; }
 .withdraw-checklist { max-height: 220px; overflow-y: auto; border: 1px solid var(--rule); border-radius: var(--radius-sm); background: var(--paper-sunken); margin-bottom: 4px; }
 /* Settle modal's checklist can list every unsettled withdrawal across every
    account/currency at once, so it's grown well past the 220px withdraw-modal
